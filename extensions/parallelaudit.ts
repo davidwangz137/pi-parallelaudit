@@ -217,7 +217,7 @@ export default function parallelaudit(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", () => disposeMonitor("session shutdown"));
 
 	pi.registerCommand("observe", {
-		description: "Toggle the parallelaudit monitor's floating thought stream.",
+		description: "Open the parallelaudit monitor's thought stream (Esc to close).",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("parallelaudit: no UI in this mode.", "info");
@@ -242,18 +242,18 @@ export default function parallelaudit(pi: ExtensionAPI): void {
 }
 
 async function openOverlay(ctx: ExtensionContext): Promise<void> {
-	// `ctx.ui.custom({overlay:true})` hardcodes a full-width bottom panel, so we
-	// use custom only to obtain the live `tui`, then open a centered floating
-	// window via `tui.showOverlay`. Calling `done()` before the factory returns
-	// marks the wrapper closed, so its `.then` disposes the returned dummy (not
-	// our floating component) and never pushes its own overlay.
+	// Modal overlay via the supported ctx.ui.custom({overlay:true}) path. It
+	// holds keyboard focus until done(), so Esc/j/k/space work and live monitor
+	// events re-render into it. (oh-my-pi's custom hardcodes a full-width panel;
+	// the centered `overlayOptions` geometry pi-btw uses is an @earendil-works
+	// API not present here, and a manual tui.showOverlay lost focus because the
+	// modal was closed immediately — so this is the reliable path.)
 	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
 		let scrollOffset = 0;
 		let lastMaxScroll = 0;
-		let handle: { hide(): void } | undefined;
-		const viewport = (): number => Math.max(4, Math.floor((process.stdout.rows ?? 40) * 0.68) - 1);
+		const viewport = (): number => Math.max(4, (process.stdout.rows ?? 40) - 3);
 
-		const floating = {
+		const component = {
 			render(width: number): readonly string[] {
 				const cols = Math.max(20, width);
 				const total = buffer.length + live.length;
@@ -283,8 +283,7 @@ async function openOverlay(ctx: ExtensionContext): Promise<void> {
 			handleInput(data: string): void {
 				const maxScroll = Math.max(0, buffer.length + live.length - viewport());
 				if (data === "\x1b" || data === "q") {
-					handle?.hide();
-					overlay = null;
+					done(undefined);
 					return;
 				}
 				if (data === "j" || data === "\x1b[B") scrollOffset = Math.min(maxScroll, scrollOffset + 1);
@@ -297,17 +296,12 @@ async function openOverlay(ctx: ExtensionContext): Promise<void> {
 				overlay = null;
 			},
 		};
-
-		handle = tui.showOverlay(floating, { width: "64%", maxHeight: "68%", anchor: "center" });
 		overlay = {
 			requestRender: () => tui.requestRender(),
 			close: () => {
-				handle?.hide();
-				overlay = null;
+				done(undefined);
 			},
 		};
-		done(undefined);
-		tui.setFocus(floating);
-		return { render: () => [] as readonly string[], handleInput() {}, invalidate() {}, dispose() {} };
-	});
+		return component;
+	}, { overlay: true });
 }

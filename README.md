@@ -2,7 +2,7 @@
 
 A silent parallel observer for [omp](https://github.com/can1357/oh-my-pi) / [pi](https://pi.dev).
 
-After each primary turn, parallelaudit feeds a transcript delta to a **second model** that thinks continuously about the primary agent's work — correctness, hidden risks, missed edge cases, better approaches. Its streamed reasoning is buffered and viewable on demand in a floating window via `/observe`.
+After each primary turn, parallelaudit feeds a transcript delta to a **second model** that thinks continuously about the primary agent's work — correctness, hidden risks, missed edge cases, better approaches. Its streamed reasoning is buffered and viewable on demand in an overlay panel via `/observe`.
 
 It never injects anything back into the primary session. It sees exactly what omp's built-in `/advisor` sees: the full transcript (assistant thinking, tool calls + intent, tool results, plan-mode context), the `read`/`search`/`find` tools to dig deeper, and automatic secret obfuscation — purely an advisory second opinion you can read whenever you want one.
 
@@ -27,10 +27,10 @@ omp -e ./extensions/parallelaudit.ts
 ## Usage
 
 ```text
-/observe            # toggle the floating thought stream
+/observe            # open the thought-stream overlay (Esc to close)
 ```
 
-Keys inside the window: `j`/`k` (or arrows) scroll, `space` page-down, `Esc`/`q` close. Run `/observe` again to reopen.
+Keys inside the overlay: `j`/`k` (or arrows) scroll, `space` page-down, `Esc`/`q` close. It's a modal — it holds focus while open, so close it (Esc) to return to the main editor.
 
 ### Monitor model
 
@@ -53,8 +53,8 @@ Everything runs on public extension APIs — no omp internals:
 
 - `pi.on("turn_end")` + `pi.pi.buildSessionContext(ctx.sessionManager.getBranch())` → the monitor is fed the same content the advisor gets: full (untruncated) thinking/text/tool-calls/tool-results plus the primary's plan-mode context, rendered by the extension's `renderDelta`.
 - `pi.pi.createAgentSession({ sessionManager: pi.pi.SessionManager.inMemory(), thinkingLevel: "medium", tools: ["read","search","find"] })` → the parallel model. Because it's a full `AgentSession`, it builds its own `SecretObfuscator` from the inherited settings, so secrets in the delta are redacted before reaching the model — same as the primary.
-- `session.subscribe(...)` → drive the floating window.
-- `ctx.ui.custom` (used only to obtain the live `tui`) → `tui.showOverlay(..., { width: "64%", maxHeight: "68%", anchor: "center" })` for the centered floating window.
+- `session.subscribe(...)` → stream the monitor's thinking/text into the overlay.
+- `ctx.ui.custom(factory, { overlay: true })` → the modal overlay panel (`Esc`/`q` closes, `j`/`k`/`space` scroll). It holds focus while open, so live monitor events re-render straight into it.
 
 All `@oh-my-pi/*` imports are type-only (erased at runtime), so the module loads from any location without package resolution.
 
