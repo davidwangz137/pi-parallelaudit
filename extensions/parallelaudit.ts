@@ -33,6 +33,10 @@ const BUFFER_MAX_LINES = 500;
 /** Default monitor model (openai-codex). Override with PARALLELAUDIT_MODEL. */
 const DEFAULT_MONITOR_MODEL = "gpt-5.5";
 
+const WIDGET_KEY = "parallelaudit";
+/** Lines of thought kept visible in the live panel (a tail — newest only). */
+const WIDGET_HEIGHT = 12;
+
 // ── session-scoped state (reset on session_start / shutdown) ─────────────
 let monitor: AgentSession | null = null;
 let monitorLabel = "";
@@ -43,7 +47,8 @@ let consecutiveFailures = 0;
 let monitorPrimed = false; // true once the monitor has been fed anything this session
 
 const buffer: string[] = [];
-let overlay: { requestRender: () => void; close: () => void } | null = null;
+let widgetOn = false;
+let widgetRequestRender: (() => void) | null = null;
 const live: string[] = []; // current streaming message, rebuilt in place each message_update
 
 function pushLine(line: string): void {
@@ -51,7 +56,7 @@ function pushLine(line: string): void {
 	if (buffer.length > BUFFER_MAX_LINES) {
 		buffer.splice(0, buffer.length - BUFFER_MAX_LINES);
 	}
-	overlay?.requestRender();
+	widgetRequestRender?.();
 }
 
 function resetState(): void {
@@ -212,19 +217,23 @@ export default function parallelaudit(pi: ExtensionAPI): void {
 		}
 	});
 
-	pi.on("session_start", () => disposeMonitor("session switch"));
+	pi.on("session_start", (_event, ctx) => {
+		disposeMonitor("session switch");
+		// omp clears widgets on switch — re-show if the user had it on.
+		if (widgetOn) showWidget(ctx);
+	});
 
 	pi.on("session_shutdown", () => disposeMonitor("session shutdown"));
 
 	pi.registerCommand("observe", {
-		description: "Open the parallelaudit monitor's thought stream (Esc to close).",
-		handler: async (_args, ctx) => {
+		description: "Toggle the parallelaudit monitor's live thought panel (above the editor).",
+		handler: (_args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("parallelaudit: no UI in this mode.", "info");
 				return;
 			}
-			if (overlay) {
-				overlay.close();
+			if (widgetOn) {
+				hideWidget(ctx);
 				return;
 			}
 			// Resume → /observe should give a second opinion immediately, without
@@ -236,72 +245,42 @@ export default function parallelaudit(pi: ExtensionAPI): void {
 					pi.logger.debug("parallelaudit observe prime error", { err: String(err) });
 				}
 			}
-			await openOverlay(ctx);
+			showWidget(ctx);
 		},
 	});
 }
 
-async function openOverlay(ctx: ExtensionContext): Promise<void> {
-	// Modal overlay via the supported ctx.ui.custom({overlay:true}) path. It
-	// holds keyboard focus until done(), so Esc/j/k/space work and live monitor
-	// events re-render into it. (oh-my-pi's custom hardcodes a full-width panel;
-	// the centered `overlayOptions` geometry pi-btw uses is an @earendil-works
-	// API not present here, and a manual tui.showOverlay lost focus because the
-	// modal was closed immediately — so this is the reliable path.)
-	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-		let scrollOffset = 0;
-		let lastMaxScroll = 0;
-		const viewport = (): number => Math.max(4, (process.stdout.rows ?? 40) - 3);
-
-		const component = {
+/** Show the monitor's live (tail) panel above the editor. Always renders the
+ *  last WIDGET_HEIGHT lines, so it auto-follows the newest thoughts; omp
+ *  re-renders the widget each frame and we requestRender on every monitor event. */
+function showWidget(ctx: ExtensionContext): void {
+	ctx.ui.setWidget(WIDGET_KEY, (tui, theme) => {
+		widgetRequestRender = () => tui.requestRender();
+		return {
 			render(width: number): readonly string[] {
 				const cols = Math.max(20, width);
-				const total = buffer.length + live.length;
+				const all = [...buffer, ...live];
 				const header =
 					theme.fg("accent", "parallelaudit") +
 					theme.fg(
 						"dim",
-						` ${monitorLabel || "no monitor yet"} · ${total} lines · Esc/q close · j/k/space scroll`,
+						` ${monitorLabel || "no monitor yet"} · ${all.length} lines · /observe to hide`,
 					);
-				const lines =
-					total > 0
-						? [...buffer, ...live]
+				const body =
+					all.length > 0
+						? all.slice(Math.max(0, all.length - WIDGET_HEIGHT))
 						: [theme.fg("dim", "(no thoughts yet — the monitor speaks after the primary's first turn)")];
-				const maxScroll = Math.max(0, lines.length - viewport());
-				// Stick to the tail while streaming if we were already at the bottom.
-				if (scrollOffset >= lastMaxScroll) scrollOffset = maxScroll;
-				if (scrollOffset > maxScroll) scrollOffset = maxScroll;
-				if (scrollOffset < 0) scrollOffset = 0;
-				lastMaxScroll = maxScroll;
-				return [
-					header,
-					...lines.slice(scrollOffset, scrollOffset + viewport()).map(s =>
-						s.length > cols ? s.slice(0, cols - 1) + "…" : s,
-					),
-				];
-			},
-			handleInput(data: string): void {
-				const maxScroll = Math.max(0, buffer.length + live.length - viewport());
-				if (data === "\x1b" || data === "q") {
-					done(undefined);
-					return;
-				}
-				if (data === "j" || data === "\x1b[B") scrollOffset = Math.min(maxScroll, scrollOffset + 1);
-				else if (data === "k" || data === "\x1b[A") scrollOffset = Math.max(0, scrollOffset - 1);
-				else if (data === " ") scrollOffset = Math.min(maxScroll, scrollOffset + viewport());
-				tui.requestRender();
+				return [header, ...body.map(s => (s.length > cols ? s.slice(0, cols - 1) + "…" : s))];
 			},
 			invalidate(): void {},
-			dispose(): void {
-				overlay = null;
-			},
 		};
-		overlay = {
-			requestRender: () => tui.requestRender(),
-			close: () => {
-				done(undefined);
-			},
-		};
-		return component;
-	}, { overlay: true });
+	});
+	widgetOn = true;
+}
+
+/** Hide the monitor panel. */
+function hideWidget(ctx: ExtensionContext): void {
+	ctx.ui.setWidget(WIDGET_KEY, undefined);
+	widgetRequestRender = null;
+	widgetOn = false;
 }

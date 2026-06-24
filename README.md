@@ -2,7 +2,7 @@
 
 A silent parallel observer for [omp](https://github.com/can1357/oh-my-pi) / [pi](https://pi.dev).
 
-After each primary turn, parallelaudit feeds a transcript delta to a **second model** that thinks continuously about the primary agent's work — correctness, hidden risks, missed edge cases, better approaches. Its streamed reasoning is buffered and viewable on demand in an overlay panel via `/observe`.
+After each primary turn, parallelaudit feeds a transcript delta to a **second model** that thinks continuously about the primary agent's work — correctness, hidden risks, missed edge cases, better approaches. Its streamed reasoning is shown in a live panel above the editor, toggled with `/observe`, so you can keep working while glancing at a second opinion.
 
 It never injects anything back into the primary session. It sees exactly what omp's built-in `/advisor` sees: the full transcript (assistant thinking, tool calls + intent, tool results, plan-mode context), the `read`/`search`/`find` tools to dig deeper, and automatic secret obfuscation — purely an advisory second opinion you can read whenever you want one.
 
@@ -27,10 +27,10 @@ omp -e ./extensions/parallelaudit.ts
 ## Usage
 
 ```text
-/observe            # open the thought-stream overlay (Esc to close)
+/observe            # toggle the live thought panel (above the editor)
 ```
 
-Keys inside the overlay: `j`/`k` (or arrows) scroll, `space` page-down, `Esc`/`q` close. It's a modal — it holds focus while open, so close it (Esc) to return to the main editor.
+The panel docks above the editor and shows the monitor's latest thoughts (a live tail of the last few lines), so you can keep working in the main editor while glancing at it. It auto-follows the newest output — there's no manual scroll, and it stays out of the way until you toggle it off with `/observe` again. It's non-modal, so it never grabs keyboard focus.
 
 ### Monitor model
 
@@ -43,7 +43,7 @@ PARALLELAUDIT_MODEL="openai-codex/gpt-5.5:medium" omp -e ./extensions/parallelau
 ## Behavior
 
 - **Trigger:** per `turn_end`. After each completed primary turn, the new transcript slice is rendered to markdown and prompted to the monitor once. Cheap (~1 monitor call per turn), and matches how omp's built-in advisor works. **`/observe` also primes on demand** — if the monitor hasn't run yet this session (e.g. right after resuming), opening it feeds the current transcript immediately so you get a second opinion without sending a new message first.
-- **Stream:** the monitor runs with thinking on; its `thinking` and `text` tokens stream live into the floating window.
+- **Stream:** the monitor runs with thinking on; its `thinking` and `text` tokens stream live into the panel (newest lines visible, auto-following).
 - **Concurrency:** if the primary completes more turns while the monitor is still thinking, those deltas are **queued, never dropped** — when the monitor frees up it drains the whole queue as one coalesced batch, so a slow monitor catches up in fewer, larger prompts while still seeing every turn. Only a batch that fails three times in a row is shed, so a persistently failing model can't stall the queue.
 - **Resume / session switch:** any live monitor is disposed on `session_start` so a stale monitor never carries context from a previous session. The cursor resets, so the first monitor turn (whether from `turn_end` or from opening `/observe`) re-primes — it feeds the full resumed transcript once so the monitor has context, then continues incrementally. (For very long resumed conversations that first prompt is large; see "Tuning" below.)
 
@@ -53,8 +53,8 @@ Everything runs on public extension APIs — no omp internals:
 
 - `pi.on("turn_end")` + `pi.pi.buildSessionContext(ctx.sessionManager.getBranch())` → the monitor is fed the same content the advisor gets: full (untruncated) thinking/text/tool-calls/tool-results plus the primary's plan-mode context, rendered by the extension's `renderDelta`.
 - `pi.pi.createAgentSession({ sessionManager: pi.pi.SessionManager.inMemory(), thinkingLevel: "medium", tools: ["read","search","find"] })` → the parallel model. Because it's a full `AgentSession`, it builds its own `SecretObfuscator` from the inherited settings, so secrets in the delta are redacted before reaching the model — same as the primary.
-- `session.subscribe(...)` → stream the monitor's thinking/text into the overlay.
-- `ctx.ui.custom(factory, { overlay: true })` → the modal overlay panel (`Esc`/`q` closes, `j`/`k`/`space` scroll). It holds focus while open, so live monitor events re-render straight into it.
+- `session.subscribe(...)` → stream the monitor's thinking/text into the panel.
+- `ctx.ui.setWidget("parallelaudit", factory)` → the live, non-modal panel above the editor (re-rendered on every monitor event via `tui.requestRender()`; re-registered on session switch since omp clears widgets). `/observe` toggles it on/off.
 
 All `@oh-my-pi/*` imports are type-only (erased at runtime), so the module loads from any location without package resolution.
 
