@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ESNext"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@oh-my-pi/pi-coding-agent": ["../oh-my-pi/packages/coding-agent/src"],
+      "@oh-my-pi/pi-coding-agent/*": ["../oh-my-pi/packages/coding-agent/src/*"],
+      "@oh-my-pi/pi-ai": ["../oh-my-pi/packages/ai/src"],
+      "@oh-my-pi/pi-ai/*": ["../oh-my-pi/packages/ai/src/*"],
+      "@oh-my-pi/pi-agent-core": ["../oh-my-pi/packages/agent/src"],
+      "@oh-my-pi/pi-agent-core/*": ["../oh-my-pi/packages/agent/src/*"],
+      "@oh-my-pi/pi-tui": ["../oh-my-pi/packages/tui/src"]
+    }
+  },
+  "include": ["extensions", "tests"]
+}

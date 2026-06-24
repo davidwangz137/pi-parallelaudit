@@ -1,0 +1,41 @@
+{
+  "name": "pi-parallelaudit",
+  "version": "0.1.0",
+  "description": "A pi/omp extension: a silent parallel model that monitors the primary agent and streams its thoughts, viewable on demand via /observe.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/davidwangz137/pi-parallelaudit.git"
+  },
+  "homepage": "https://github.com/davidwangz137/pi-parallelaudit#readme",
+  "bugs": {
+    "url": "https://github.com/davidwangz137/pi-parallelaudit/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "omp",
+    "pi-coding-agent"
+  ],
+  "files": [
+    "extensions"
+  ],
+  "scripts": {
+    "test": "vitest --run",
+    "typecheck": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/parallelaudit.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@oh-my-pi/pi-ai": ">=16.0.0",
+    "@oh-my-pi/pi-coding-agent": ">=16.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.9"
+  }
+}

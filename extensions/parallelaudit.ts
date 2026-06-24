@@ -1,0 +1,261 @@
+/**
+ * parallelaudit — a silent parallel observer extension.
+ *
+ * After each primary turn it feeds a transcript delta to a second model that
+ * thinks continuously about the primary's work. Its streamed reasoning is
+ * buffered and viewable on demand via `/observe`. It never injects anything
+ * back into the primary session and has no tools.
+ *
+ * Runtime values come entirely from `pi.pi` (createAgentSession / SessionManager
+ * / buildSessionContext), so this module performs no `@oh-my-pi/*` runtime
+ * import — it loads from any location without package resolution. Types are
+ * type-only (erased at runtime).
+ */
+import type { Model } from "@oh-my-pi/pi-ai";
+import type {
+	AgentSession,
+	AgentSessionEvent,
+	ExtensionAPI,
+	ExtensionContext,
+} from "@oh-my-pi/pi-coding-agent";
+import { renderDelta } from "./delta";
+
+const MONITOR_SYSTEM_PROMPT = [
+	"You are a silent parallel observer attached to another coding agent's session.",
+	"After each of its turns you receive a transcript delta of what it just did.",
+	"Think continuously and critically about its work: correctness, hidden risks, missed edge cases, better approaches, wrong assumptions.",
+	"Stream your reasoning as you go. You are advisory only — you have no tools, cannot edit files or run commands, and cannot affect the primary agent.",
+	"Be concise and specific; quote the exact thing you are concerned about. Do not flatter or restate; raise only substantive observations.",
+].join(" ");
+
+const BUFFER_MAX_LINES = 500;
+
+// ── session-scoped state (reset on session_start / shutdown) ─────────────
+let monitor: AgentSession | null = null;
+let monitorLabel = "";
+let cursor = 0; // last-seen primary message count
+let monitorBusy = false;
+let pendingDelta: string | null = null;
+let consecutiveFailures = 0;
+
+const buffer: string[] = [];
+let overlay: { requestRender: () => void; close: () => void } | null = null;
+
+function pushLine(line: string): void {
+	buffer.push(line);
+	if (buffer.length > BUFFER_MAX_LINES) {
+		buffer.splice(0, buffer.length - BUFFER_MAX_LINES);
+	}
+	overlay?.requestRender();
+}
+
+function resetState(): void {
+	buffer.length = 0;
+	cursor = 0;
+	monitorBusy = false;
+	pendingDelta = null;
+	consecutiveFailures = 0;
+}
+
+/** Abort any live monitor and reset session-scoped state. Used on both
+ *  session_start (resume/switch — a stale monitor must not carry context from
+ *  the previous session) and session_shutdown. */
+function disposeMonitor(reason: string): void {
+	void (async () => {
+		try {
+			await monitor?.abort(reason);
+		} catch {}
+		monitor = null;
+		resetState();
+	})();
+}
+
+async function ensureMonitor(pi: ExtensionAPI, ctx: ExtensionContext): Promise<AgentSession | null> {
+	if (monitor) return monitor;
+	const spec = process.env.PARALLELAUDIT_MODEL;
+	const model: Model | undefined = spec
+		? (ctx.models.resolve(spec) ?? undefined)
+		: (ctx.models.current() ?? undefined);
+	if (!model) {
+		pi.logger.warn(
+			"parallelaudit: no monitor model available (set PARALLELAUDIT_MODEL or run with a main model)",
+		);
+		return null;
+	}
+	monitorLabel = `${model.provider}/${model.id}`;
+	try {
+		const { session } = await pi.pi.createAgentSession({
+			cwd: ctx.cwd,
+			model,
+			modelRegistry: ctx.modelRegistry,
+			thinkingLevel: "medium",
+			systemPrompt: [MONITOR_SYSTEM_PROMPT],
+			tools: [],
+			sessionManager: pi.pi.SessionManager.inMemory(),
+			// Skip every discovery path — the monitor needs none of it.
+			contextFiles: [],
+			skills: [],
+			slashCommands: [],
+			promptTemplates: [],
+		});
+		session.subscribe(handleMonitorEvent);
+		monitor = session;
+		pushLine(`_monitor started on ${monitorLabel}_`);
+		return session;
+	} catch (err) {
+		pi.logger.warn("parallelaudit: failed to create monitor session", { err: String(err) });
+		return null;
+	}
+}
+
+function handleMonitorEvent(ev: AgentSessionEvent): void {
+	if (ev.type !== "message_update" && ev.type !== "message_end") return;
+	const msg = ev.message;
+	if (msg.role !== "assistant") return;
+	for (const block of msg.content) {
+		if (block.type === "thinking") {
+			const t = block.thinking.trimEnd();
+			if (t) pushLine(`  ${t}`);
+		} else if (block.type === "text") {
+			const t = block.text.trimEnd();
+			if (t) pushLine(t);
+		}
+	}
+	if (ev.type === "message_end") pushLine("");
+}
+
+/** Fire-and-forget: never blocks the primary turn_end handler. */
+function feed(pi: ExtensionAPI, ctx: ExtensionContext, delta: string): void {
+	void (async () => {
+		const session = await ensureMonitor(pi, ctx);
+		if (!session) return;
+		if (monitorBusy) {
+			pendingDelta = delta; // keep only the latest queued delta
+			return;
+		}
+		await runTurn(pi, session, delta);
+	})();
+}
+
+async function runTurn(pi: ExtensionAPI, session: AgentSession, delta: string): Promise<void> {
+	monitorBusy = true;
+	pushLine(`\n━━━ turn ${new Date().toLocaleTimeString()} ━━━`);
+	try {
+		await session.prompt(`### Session update\n\n${delta}`);
+		consecutiveFailures = 0;
+	} catch (err) {
+		consecutiveFailures++;
+		pi.logger.debug("parallelaudit monitor turn failed", {
+			err: String(err),
+			consecutiveFailures,
+		});
+		if (consecutiveFailures >= 3) {
+			pi.logger.warn("parallelaudit monitor failed 3x consecutively; dropping pending delta");
+			pendingDelta = null;
+			consecutiveFailures = 0;
+		}
+	} finally {
+		monitorBusy = false;
+		const next = pendingDelta;
+		pendingDelta = null;
+		if (next) await runTurn(pi, session, next);
+	}
+}
+
+export default function parallelaudit(pi: ExtensionAPI): void {
+	pi.on("turn_end", (_event, ctx) => {
+		try {
+			const { messages } = pi.pi.buildSessionContext(ctx.sessionManager.getBranch());
+			const { text, nextCount } = renderDelta(messages, cursor);
+			cursor = nextCount;
+			if (text) feed(pi, ctx, text);
+		} catch (err) {
+			pi.logger.debug("parallelaudit turn_end handler error", { err: String(err) });
+		}
+	});
+
+	pi.on("session_start", () => disposeMonitor("session switch"));
+
+	pi.on("session_shutdown", () => disposeMonitor("session shutdown"));
+
+	pi.registerCommand("observe", {
+		description: "Toggle the parallelaudit monitor's floating thought stream.",
+		handler: async (_args, ctx) => {
+			if (!ctx.hasUI) {
+				ctx.ui.notify("parallelaudit: no UI in this mode.", "info");
+				return;
+			}
+			if (overlay) {
+				overlay.close();
+				return;
+			}
+			await openOverlay(ctx);
+		},
+	});
+}
+
+async function openOverlay(ctx: ExtensionContext): Promise<void> {
+	// `ctx.ui.custom({overlay:true})` hardcodes a full-width bottom panel, so we
+	// use custom only to obtain the live `tui`, then open a centered floating
+	// window via `tui.showOverlay`. Calling `done()` before the factory returns
+	// marks the wrapper closed, so its `.then` disposes the returned dummy (not
+	// our floating component) and never pushes its own overlay.
+	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+		let scrollOffset = 0;
+		let handle: { hide(): void } | undefined;
+		const viewport = (): number => Math.max(4, Math.floor((process.stdout.rows ?? 40) * 0.68) - 1);
+
+		const floating = {
+			render(width: number): readonly string[] {
+				const cols = Math.max(20, width);
+				const header =
+					theme.fg("accent", "parallelaudit") +
+					theme.fg(
+						"dim",
+						` ${monitorLabel || "no monitor yet"} · ${buffer.length} lines · Esc/q close · j/k/space scroll`,
+					);
+				const lines =
+					buffer.length > 0
+						? buffer.slice()
+						: [theme.fg("dim", "(no thoughts yet — the monitor speaks after the primary's first turn)")];
+				const maxScroll = Math.max(0, lines.length - viewport());
+				if (scrollOffset > maxScroll) scrollOffset = maxScroll;
+				if (scrollOffset < 0) scrollOffset = 0;
+				return [
+					header,
+					...lines.slice(scrollOffset, scrollOffset + viewport()).map(s =>
+						s.length > cols ? s.slice(0, cols - 1) + "…" : s,
+					),
+				];
+			},
+			handleInput(data: string): void {
+				const maxScroll = Math.max(0, buffer.length - viewport());
+				if (data === "\x1b" || data === "q") {
+					handle?.hide();
+					overlay = null;
+					return;
+				}
+				if (data === "j" || data === "\x1b[B") scrollOffset = Math.min(maxScroll, scrollOffset + 1);
+				else if (data === "k" || data === "\x1b[A") scrollOffset = Math.max(0, scrollOffset - 1);
+				else if (data === " ") scrollOffset = Math.min(maxScroll, scrollOffset + viewport());
+				tui.requestRender();
+			},
+			invalidate(): void {},
+			dispose(): void {
+				overlay = null;
+			},
+		};
+
+		handle = tui.showOverlay(floating, { width: "64%", maxHeight: "68%", anchor: "center" });
+		overlay = {
+			requestRender: () => tui.requestRender(),
+			close: () => {
+				handle?.hide();
+				overlay = null;
+			},
+		};
+		done(undefined);
+		tui.setFocus(floating);
+		return { render: () => [] as readonly string[], handleInput() {}, invalidate() {}, dispose() {} };
+	});
+}
