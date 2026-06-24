@@ -38,7 +38,7 @@ let monitor: AgentSession | null = null;
 let monitorLabel = "";
 let cursor = 0; // last-seen primary message count
 let monitorBusy = false;
-let pendingDelta: string | null = null;
+const pendingDeltas: string[] = []; // queued transcript slices, drained as one coalesced batch
 let consecutiveFailures = 0;
 let monitorPrimed = false; // true once the monitor has been fed anything this session
 
@@ -59,7 +59,7 @@ function resetState(): void {
 	cursor = 0;
 	live.length = 0;
 	monitorBusy = false;
-	pendingDelta = null;
+	pendingDeltas.length = 0;
 	consecutiveFailures = 0;
 	monitorPrimed = false;
 }
@@ -154,7 +154,7 @@ function feed(pi: ExtensionAPI, ctx: ExtensionContext, delta: string): void {
 		const session = await ensureMonitor(pi, ctx);
 		if (!session) return;
 		if (monitorBusy) {
-			pendingDelta = delta; // keep only the latest queued delta
+			pendingDeltas.push(delta);
 			return;
 		}
 		await runTurn(pi, session, delta);
@@ -174,15 +174,22 @@ async function runTurn(pi: ExtensionAPI, session: AgentSession, delta: string): 
 			consecutiveFailures,
 		});
 		if (consecutiveFailures >= 3) {
-			pi.logger.warn("parallelaudit monitor failed 3x consecutively; dropping pending delta");
-			pendingDelta = null;
+			// A batch that keeps failing would loop forever; shed it and let the
+			// queue drain onward. (Only a failing batch is ever dropped.)
+			pi.logger.warn("parallelaudit monitor failed 3x on a batch; dropping it and continuing");
 			consecutiveFailures = 0;
+		} else {
+			pendingDeltas.unshift(delta); // retry this batch on the next drain
 		}
 	} finally {
-		monitorBusy = false;
-		const next = pendingDelta;
-		pendingDelta = null;
-		if (next) await runTurn(pi, session, next);
+		if (pendingDeltas.length > 0) {
+			// Drain the whole queue as one coalesced batch: a slow monitor
+			// catches up in fewer, larger prompts instead of dropping turns.
+			const batch = pendingDeltas.splice(0).join("\n\n");
+			await runTurn(pi, session, batch);
+		} else {
+			monitorBusy = false;
+		}
 	}
 }
 
