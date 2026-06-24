@@ -49,6 +49,7 @@ let monitorPrimed = false; // true once the monitor has been fed anything this s
 const buffer: string[] = [];
 let widgetOn = false;
 let widgetRequestRender: (() => void) | null = null;
+let widgetForceRender: (() => void) | null = null;
 let overlay: { requestRender: () => void; close: () => void } | null = null;
 const live: string[] = []; // current streaming message, rebuilt in place each message_update
 
@@ -256,11 +257,14 @@ export default function parallelaudit(pi: ExtensionAPI): void {
 
 /** Show the monitor's live tail panel above the editor. Always renders a fixed
  *  height (WIDGET_HEIGHT body rows) to avoid scrollback artifacts from a widget
- *  that grows while streaming. Uses Markdown so bullets/bold read cleanly. */
 function showWidget(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	ctx.ui.setWidget(WIDGET_KEY, (tui, theme) => {
 		const markdown = new pi.pi.Markdown("", 0, 0, pi.pi.getMarkdownTheme());
 		widgetRequestRender = () => tui.requestRender();
+		widgetForceRender = () => tui.requestRender(true);
+		// First mount is a structural layout change (widget inserted above the editor).
+		// Force one full repaint so the old prompt line doesn't linger in scrollback.
+		queueMicrotask(() => tui.requestRender(true));
 		return {
 			render(width: number): readonly string[] {
 				const all = [...buffer, ...live];
@@ -290,9 +294,13 @@ function showWidget(pi: ExtensionAPI, ctx: ExtensionContext): void {
 
 /** Hide the monitor panel. */
 function hideWidget(ctx: ExtensionContext): void {
+	const force = widgetForceRender;
 	ctx.ui.setWidget(WIDGET_KEY, undefined);
 	widgetRequestRender = null;
+	widgetForceRender = null;
 	widgetOn = false;
+	// Panel removal is also a structural change; repaint the viewport cleanly.
+	force?.();
 }
 
 /** Prime the monitor with the current transcript if it hasn't run this session
@@ -361,6 +369,9 @@ async function openFullView(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
 			},
 			dispose(): void {
 				overlay = null;
+				// Modal close is a structural viewport change; repaint cleanly so the
+				// old prompt line doesn't linger under the restored transcript/editor.
+				queueMicrotask(() => tui.requestRender(true));
 			},
 		};
 		overlay = {
@@ -369,6 +380,9 @@ async function openFullView(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
 				done(undefined);
 			},
 		};
+		// Opening the modal also replaces the viewport structure; force one clean
+		// repaint after mount rather than relying on a diff paint.
+		queueMicrotask(() => tui.requestRender(true));
 		return component;
 	}, { overlay: true });
 }
