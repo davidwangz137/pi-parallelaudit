@@ -226,7 +226,7 @@ export default function parallelaudit(pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => {
 		disposeMonitor("session switch");
 		// omp clears widgets on switch — re-show if the user had it on.
-		if (widgetOn) showWidget(ctx);
+		if (widgetOn) showWidget(pi, ctx);
 	});
 
 	pi.on("session_shutdown", () => disposeMonitor("session shutdown"));
@@ -240,7 +240,7 @@ export default function parallelaudit(pi: ExtensionAPI): void {
 			}
 			if (args.trim() === "full") {
 				primeIfNeeded(pi, ctx);
-				await openFullView(ctx);
+				await openFullView(pi, ctx);
 				return;
 			}
 			if (widgetOn) {
@@ -248,20 +248,20 @@ export default function parallelaudit(pi: ExtensionAPI): void {
 				return;
 			}
 			primeIfNeeded(pi, ctx);
-			showWidget(ctx);
+			showWidget(pi, ctx);
 		},
 	});
 }
 
-/** Show the monitor's live (tail) panel above the editor. Always renders the
- *  last WIDGET_HEIGHT lines, so it auto-follows the newest thoughts; omp
- *  re-renders the widget each frame and we requestRender on every monitor event. */
-function showWidget(ctx: ExtensionContext): void {
+/** Show the monitor's live tail panel above the editor. Always renders a fixed
+ *  height (WIDGET_HEIGHT body rows) to avoid scrollback artifacts from a widget
+ *  that grows while streaming. Uses Markdown so bullets/bold read cleanly. */
+function showWidget(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	ctx.ui.setWidget(WIDGET_KEY, (tui, theme) => {
+		const markdown = new pi.pi.Markdown("", 0, 0, theme);
 		widgetRequestRender = () => tui.requestRender();
 		return {
 			render(width: number): readonly string[] {
-				const cols = Math.max(20, width);
 				const all = [...buffer, ...live];
 				const header =
 					theme.fg("accent", "parallelaudit") +
@@ -269,13 +269,19 @@ function showWidget(ctx: ExtensionContext): void {
 						"dim",
 						` ${monitorLabel || "no monitor yet"} · ${all.length} lines · /observe to hide`,
 					);
-				const body =
+				markdown.setText(
 					all.length > 0
-						? all.slice(Math.max(0, all.length - WIDGET_HEIGHT))
-						: [theme.fg("dim", "(no thoughts yet — the monitor speaks after the primary's first turn)")];
-				return [header, ...body.map(s => (s.length > cols ? s.slice(0, cols - 1) + "…" : s))];
+						? all.join("\n\n")
+						: "(no thoughts yet — the monitor speaks after the primary's first turn)",
+				);
+				const rendered = [...markdown.render(width)];
+				const tail = rendered.slice(Math.max(0, rendered.length - WIDGET_HEIGHT));
+				while (tail.length < WIDGET_HEIGHT) tail.push("");
+				return [header, ...tail];
 			},
-			invalidate(): void {},
+			invalidate(): void {
+				markdown.invalidate();
+			},
 		};
 	});
 	widgetOn = true;
@@ -299,18 +305,18 @@ function primeIfNeeded(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	}
 }
 
-/** Full-page, scrollable modal of the whole thought log (the live panel only
- *  shows the tail). Holds keyboard focus until Esc; sticks to the tail while
- *  streaming unless you scroll up. */
-async function openFullView(ctx: ExtensionContext): Promise<void> {
+/** Full-page, scrollable modal of the whole thought log. Renders markdown and
+ *  sticks to the tail while streaming unless you scroll up. */
+async function openFullView(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
 		let scrollOffset = 0;
 		let stick = true;
+		let lastRenderedLength = 0;
 		const viewport = (): number => Math.max(4, (process.stdout.rows ?? 40) - 3);
+		const markdown = new pi.pi.Markdown("", 0, 0, theme);
 
 		const component = {
 			render(width: number): readonly string[] {
-				const cols = Math.max(20, width);
 				const all = [...buffer, ...live];
 				const header =
 					theme.fg("accent", "parallelaudit") +
@@ -318,23 +324,21 @@ async function openFullView(ctx: ExtensionContext): Promise<void> {
 						"dim",
 						` ${monitorLabel || "no monitor yet"} · ${all.length} lines · Esc/q close · j/k/space scroll`,
 					);
-				const lines =
+				markdown.setText(
 					all.length > 0
-						? all
-						: [theme.fg("dim", "(no thoughts yet — the monitor speaks after the primary's first turn)")];
+						? all.join("\n\n")
+						: "(no thoughts yet — the monitor speaks after the primary's first turn)",
+				);
+				const lines = [...markdown.render(width)];
+				lastRenderedLength = lines.length;
 				const maxScroll = Math.max(0, lines.length - viewport());
 				if (stick) scrollOffset = maxScroll;
 				if (scrollOffset > maxScroll) scrollOffset = maxScroll;
 				if (scrollOffset < 0) scrollOffset = 0;
-				return [
-					header,
-					...lines.slice(scrollOffset, scrollOffset + viewport()).map(s =>
-						s.length > cols ? s.slice(0, cols - 1) + "…" : s,
-					),
-				];
+				return [header, ...lines.slice(scrollOffset, scrollOffset + viewport())];
 			},
 			handleInput(data: string): void {
-				const maxScroll = Math.max(0, buffer.length + live.length - viewport());
+				const maxScroll = Math.max(0, lastRenderedLength - viewport());
 				if (data === "\x1b" || data === "q") {
 					done(undefined);
 					return;
@@ -351,7 +355,9 @@ async function openFullView(ctx: ExtensionContext): Promise<void> {
 				}
 				tui.requestRender();
 			},
-			invalidate(): void {},
+			invalidate(): void {
+				markdown.invalidate();
+			},
 			dispose(): void {
 				overlay = null;
 			},
