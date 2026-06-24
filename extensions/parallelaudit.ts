@@ -258,7 +258,7 @@ export default function parallelaudit(pi: ExtensionAPI): void {
  *  that grows while streaming. Uses Markdown so bullets/bold read cleanly. */
 function showWidget(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	ctx.ui.setWidget(WIDGET_KEY, (tui, theme) => {
-		const markdown = new pi.pi.Markdown("", 0, 0, theme);
+		const markdown = new pi.pi.Markdown("", 0, 0, pi.pi.getMarkdownTheme());
 		widgetRequestRender = () => tui.requestRender();
 		return {
 			render(width: number): readonly string[] {
@@ -313,7 +313,7 @@ async function openFullView(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
 		let stick = true;
 		let lastRenderedLength = 0;
 		const viewport = (): number => Math.max(4, (process.stdout.rows ?? 40) - 3);
-		const markdown = new pi.pi.Markdown("", 0, 0, theme);
+		const markdown = new pi.pi.Markdown("", 0, 0, pi.pi.getMarkdownTheme());
 
 		const component = {
 			render(width: number): readonly string[] {
