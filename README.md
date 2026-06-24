@@ -34,7 +34,7 @@ Keys inside the window: `j`/`k` (or arrows) scroll, `space` page-down, `Esc`/`q`
 
 ### Monitor model
 
-By default the monitor inherits the primary session's model. Set a different one with an env var (any string `ctx.models.resolve` accepts — provider/id, bare id, or role alias):
+By default the monitor uses **gpt-5.5** (openai-codex). Override it with an env var (any string `ctx.models.resolve` accepts — provider/id, bare id, or role alias); if the chosen model can't be resolved it falls back to the primary session's model:
 
 ```bash
 PARALLELAUDIT_MODEL="anthropic/claude-sonnet-4-5:medium" omp -e ./extensions/parallelaudit.ts

@@ -30,6 +30,8 @@ const MONITOR_SYSTEM_PROMPT = [
 ].join(" ");
 
 const BUFFER_MAX_LINES = 500;
+/** Default monitor model (openai-codex). Override with PARALLELAUDIT_MODEL. */
+const DEFAULT_MONITOR_MODEL = "gpt-5.5";
 
 // ── session-scoped state (reset on session_start / shutdown) ─────────────
 let monitor: AgentSession | null = null;
@@ -77,13 +79,12 @@ function disposeMonitor(reason: string): void {
 
 async function ensureMonitor(pi: ExtensionAPI, ctx: ExtensionContext): Promise<AgentSession | null> {
 	if (monitor) return monitor;
-	const spec = process.env.PARALLELAUDIT_MODEL;
-	const model: Model | undefined = spec
-		? (ctx.models.resolve(spec) ?? undefined)
-		: (ctx.models.current() ?? undefined);
+	const spec = process.env.PARALLELAUDIT_MODEL ?? DEFAULT_MONITOR_MODEL;
+	const model: Model | undefined =
+		ctx.models.resolve(spec) ?? ctx.models.current() ?? undefined;
 	if (!model) {
 		pi.logger.warn(
-			"parallelaudit: no monitor model available (set PARALLELAUDIT_MODEL or run with a main model)",
+			`parallelaudit: could not resolve monitor model "${spec}" and no main model is available (set PARALLELAUDIT_MODEL)`,
 		);
 		return null;
 	}
