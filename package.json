@@ -19,7 +19,9 @@
     "pi-coding-agent"
   ],
   "files": [
-    "extensions"
+    "extensions",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "test": "vitest --run",
