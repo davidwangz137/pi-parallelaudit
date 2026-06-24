@@ -4,7 +4,7 @@ A silent parallel observer for [omp](https://github.com/can1357/oh-my-pi) / [pi]
 
 After each primary turn, parallelaudit feeds a transcript delta to a **second model** that thinks continuously about the primary agent's work — correctness, hidden risks, missed edge cases, better approaches. Its streamed reasoning is buffered and viewable on demand in a floating window via `/observe`.
 
-It never injects anything back into the primary session and has no tools — it is purely an advisory second opinion you can read whenever you want one.
+It never injects anything back into the primary session. It sees exactly what omp's built-in `/advisor` sees: the full transcript (assistant thinking, tool calls + intent, tool results, plan-mode context), the `read`/`search`/`find` tools to dig deeper, and automatic secret obfuscation — purely an advisory second opinion you can read whenever you want one.
 
 ## Install
 
@@ -37,7 +37,7 @@ Keys inside the window: `j`/`k` (or arrows) scroll, `space` page-down, `Esc`/`q`
 By default the monitor uses **gpt-5.5** (openai-codex). Override it with an env var (any string `ctx.models.resolve` accepts — provider/id, bare id, or role alias); if the chosen model can't be resolved it falls back to the primary session's model:
 
 ```bash
-PARALLELAUDIT_MODEL="anthropic/claude-sonnet-4-5:medium" omp -e ./extensions/parallelaudit.ts
+PARALLELAUDIT_MODEL="openai-codex/gpt-5.5:medium" omp -e ./extensions/parallelaudit.ts
 ```
 
 ## Behavior
@@ -51,8 +51,8 @@ PARALLELAUDIT_MODEL="anthropic/claude-sonnet-4-5:medium" omp -e ./extensions/par
 
 Everything runs on public extension APIs — no omp internals:
 
-- `pi.on("turn_end")` + `pi.pi.buildSessionContext(ctx.sessionManager.getBranch())` → render the delta.
-- `pi.pi.createAgentSession({ sessionManager: pi.pi.SessionManager.inMemory(), thinkingLevel: "medium", tools: [] })` → the parallel model.
+- `pi.on("turn_end")` + `pi.pi.buildSessionContext(ctx.sessionManager.getBranch())` → the monitor is fed the same content the advisor gets: full (untruncated) thinking/text/tool-calls/tool-results plus the primary's plan-mode context, rendered by the extension's `renderDelta`.
+- `pi.pi.createAgentSession({ sessionManager: pi.pi.SessionManager.inMemory(), thinkingLevel: "medium", tools: ["read","search","find"] })` → the parallel model. Because it's a full `AgentSession`, it builds its own `SecretObfuscator` from the inherited settings, so secrets in the delta are redacted before reaching the model — same as the primary.
 - `session.subscribe(...)` → drive the floating window.
 - `ctx.ui.custom` (used only to obtain the live `tui`) → `tui.showOverlay(..., { width: "64%", maxHeight: "68%", anchor: "center" })` for the centered floating window.
 

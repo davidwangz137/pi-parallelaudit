@@ -88,6 +88,40 @@ describe("renderMessage", () => {
 	it("returns null for a whitespace-only user message", () => {
 		expect(renderMessage(user("   "))).toBeNull();
 	});
+
+	it("renders a tool-call intent as a comment above the call", () => {
+		const msg = assistant([
+			{ type: "toolCall", id: "c1", name: "edit", arguments: { path: "a.ts" }, intent: "fix the off-by-one" },
+		]);
+		const out = renderMessage(msg);
+		expect(out).toContain("// fix the off-by-one");
+		expect(out).toContain("→ `edit`(");
+	});
+
+	it("expands primary-context custom messages verbatim and xml-escaped", () => {
+		// Fixture: the `custom` role is merged into AgentMessage by omp at runtime,
+		// not by the bare pi-agent-core type imported here — the cast is a test seam.
+		const planMsg = {
+			role: "custom",
+			customType: "plan-mode-context",
+			content: "NEVER edit files <except> the plan & nothing else",
+			timestamp: 1,
+		} as unknown as AgentMessage;
+		const out = renderMessage(planMsg);
+		expect(out).toContain('<primary-context kind="plan-mode-context">');
+		expect(out).toContain("NEVER edit files &lt;except&gt; the plan &amp; nothing else");
+		expect(out).toContain("</primary-context>");
+	});
+
+	it("skips custom messages that are not primary context", () => {
+		const ircMsg = {
+			role: "custom",
+			customType: "irc",
+			content: "hi",
+			timestamp: 1,
+		} as unknown as AgentMessage;
+		expect(renderMessage(ircMsg)).toBeNull();
+	});
 });
 
 describe("renderDelta", () => {

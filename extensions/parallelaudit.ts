@@ -96,7 +96,7 @@ async function ensureMonitor(pi: ExtensionAPI, ctx: ExtensionContext): Promise<A
 			modelRegistry: ctx.modelRegistry,
 			thinkingLevel: "medium",
 			systemPrompt: [MONITOR_SYSTEM_PROMPT],
-			tools: [],
+			tools: ["read", "search", "find"],
 			sessionManager: pi.pi.SessionManager.inMemory(),
 			// Skip every discovery path — the monitor needs none of it.
 			contextFiles: [],
