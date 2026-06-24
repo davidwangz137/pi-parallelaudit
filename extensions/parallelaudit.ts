@@ -38,6 +38,7 @@ let cursor = 0; // last-seen primary message count
 let monitorBusy = false;
 let pendingDelta: string | null = null;
 let consecutiveFailures = 0;
+let monitorPrimed = false; // true once the monitor has been fed anything this session
 
 const buffer: string[] = [];
 let overlay: { requestRender: () => void; close: () => void } | null = null;
@@ -58,6 +59,7 @@ function resetState(): void {
 	monitorBusy = false;
 	pendingDelta = null;
 	consecutiveFailures = 0;
+	monitorPrimed = false;
 }
 
 /** Abort any live monitor and reset session-scoped state. Used on both
@@ -146,6 +148,7 @@ function handleMonitorEvent(ev: AgentSessionEvent): void {
 
 /** Fire-and-forget: never blocks the primary turn_end handler. */
 function feed(pi: ExtensionAPI, ctx: ExtensionContext, delta: string): void {
+	monitorPrimed = true;
 	void (async () => {
 		const session = await ensureMonitor(pi, ctx);
 		if (!session) return;
@@ -182,13 +185,20 @@ async function runTurn(pi: ExtensionAPI, session: AgentSession, delta: string): 
 	}
 }
 
+/** Build the transcript delta since `cursor` and feed it to the monitor,
+ *  advancing the cursor whether or not there was anything to show. Shared by
+ *  turn_end and the /observe "prime now" path. */
+function feedCurrentDelta(pi: ExtensionAPI, ctx: ExtensionContext): void {
+	const { messages } = pi.pi.buildSessionContext(ctx.sessionManager.getBranch());
+	const { text, nextCount } = renderDelta(messages, cursor);
+	cursor = nextCount;
+	if (text) feed(pi, ctx, text);
+}
+
 export default function parallelaudit(pi: ExtensionAPI): void {
 	pi.on("turn_end", (_event, ctx) => {
 		try {
-			const { messages } = pi.pi.buildSessionContext(ctx.sessionManager.getBranch());
-			const { text, nextCount } = renderDelta(messages, cursor);
-			cursor = nextCount;
-			if (text) feed(pi, ctx, text);
+			feedCurrentDelta(pi, ctx);
 		} catch (err) {
 			pi.logger.debug("parallelaudit turn_end handler error", { err: String(err) });
 		}
@@ -208,6 +218,15 @@ export default function parallelaudit(pi: ExtensionAPI): void {
 			if (overlay) {
 				overlay.close();
 				return;
+			}
+			// Resume → /observe should give a second opinion immediately, without
+			// waiting for the next turn_end. Only primes once per session.
+			if (!monitorPrimed) {
+				try {
+					feedCurrentDelta(pi, ctx);
+				} catch (err) {
+					pi.logger.debug("parallelaudit observe prime error", { err: String(err) });
+				}
 			}
 			await openOverlay(ctx);
 		},
