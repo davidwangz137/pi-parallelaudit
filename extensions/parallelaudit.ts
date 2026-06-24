@@ -49,6 +49,7 @@ let monitorPrimed = false; // true once the monitor has been fed anything this s
 const buffer: string[] = [];
 let widgetOn = false;
 let widgetRequestRender: (() => void) | null = null;
+let overlay: { requestRender: () => void; close: () => void } | null = null;
 const live: string[] = []; // current streaming message, rebuilt in place each message_update
 
 function pushLine(line: string): void {
@@ -56,12 +57,17 @@ function pushLine(line: string): void {
 	if (buffer.length > BUFFER_MAX_LINES) {
 		buffer.splice(0, buffer.length - BUFFER_MAX_LINES);
 	}
+	requestActiveRender();
+}
+
+/** Repaint whichever views are active — the live panel and/or the full modal. */
+function requestActiveRender(): void {
 	widgetRequestRender?.();
+	overlay?.requestRender();
 }
 
 function resetState(): void {
 	buffer.length = 0;
-	cursor = 0;
 	live.length = 0;
 	monitorBusy = false;
 	pendingDeltas.length = 0;
@@ -141,14 +147,14 @@ function handleMonitorEvent(ev: AgentSessionEvent): void {
 		// stream replaces its line rather than appending every prefix.
 		live.length = 0;
 		appendAssistantLines(live, ev.message);
-		overlay?.requestRender();
+		requestActiveRender();
 		return;
 	}
 	if (ev.type === "message_end") {
 		appendAssistantLines(buffer, ev.message);
-		if (ev.message.role === "assistant") pushLine("");
 		live.length = 0;
-		overlay?.requestRender();
+		if (ev.message.role === "assistant") pushLine("");
+		else requestActiveRender();
 	}
 }
 
@@ -226,25 +232,22 @@ export default function parallelaudit(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", () => disposeMonitor("session shutdown"));
 
 	pi.registerCommand("observe", {
-		description: "Toggle the parallelaudit monitor's live thought panel (above the editor).",
-		handler: (_args, ctx) => {
+		description: "Toggle the live thought panel; `/observe full` opens a full-page scrollable view.",
+		handler: async (args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("parallelaudit: no UI in this mode.", "info");
+				return;
+			}
+			if (args.trim() === "full") {
+				primeIfNeeded(pi, ctx);
+				await openFullView(ctx);
 				return;
 			}
 			if (widgetOn) {
 				hideWidget(ctx);
 				return;
 			}
-			// Resume → /observe should give a second opinion immediately, without
-			// waiting for the next turn_end. Only primes once per session.
-			if (!monitorPrimed) {
-				try {
-					feedCurrentDelta(pi, ctx);
-				} catch (err) {
-					pi.logger.debug("parallelaudit observe prime error", { err: String(err) });
-				}
-			}
+			primeIfNeeded(pi, ctx);
 			showWidget(ctx);
 		},
 	});
@@ -283,4 +286,82 @@ function hideWidget(ctx: ExtensionContext): void {
 	ctx.ui.setWidget(WIDGET_KEY, undefined);
 	widgetRequestRender = null;
 	widgetOn = false;
+}
+
+/** Prime the monitor with the current transcript if it hasn't run this session
+ *  (so /observe yields a second opinion immediately, even right after resume). */
+function primeIfNeeded(pi: ExtensionAPI, ctx: ExtensionContext): void {
+	if (monitorPrimed) return;
+	try {
+		feedCurrentDelta(pi, ctx);
+	} catch (err) {
+		pi.logger.debug("parallelaudit observe prime error", { err: String(err) });
+	}
+}
+
+/** Full-page, scrollable modal of the whole thought log (the live panel only
+ *  shows the tail). Holds keyboard focus until Esc; sticks to the tail while
+ *  streaming unless you scroll up. */
+async function openFullView(ctx: ExtensionContext): Promise<void> {
+	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+		let scrollOffset = 0;
+		let stick = true;
+		const viewport = (): number => Math.max(4, (process.stdout.rows ?? 40) - 3);
+
+		const component = {
+			render(width: number): readonly string[] {
+				const cols = Math.max(20, width);
+				const all = [...buffer, ...live];
+				const header =
+					theme.fg("accent", "parallelaudit") +
+					theme.fg(
+						"dim",
+						` ${monitorLabel || "no monitor yet"} · ${all.length} lines · Esc/q close · j/k/space scroll`,
+					);
+				const lines =
+					all.length > 0
+						? all
+						: [theme.fg("dim", "(no thoughts yet — the monitor speaks after the primary's first turn)")];
+				const maxScroll = Math.max(0, lines.length - viewport());
+				if (stick) scrollOffset = maxScroll;
+				if (scrollOffset > maxScroll) scrollOffset = maxScroll;
+				if (scrollOffset < 0) scrollOffset = 0;
+				return [
+					header,
+					...lines.slice(scrollOffset, scrollOffset + viewport()).map(s =>
+						s.length > cols ? s.slice(0, cols - 1) + "…" : s,
+					),
+				];
+			},
+			handleInput(data: string): void {
+				const maxScroll = Math.max(0, buffer.length + live.length - viewport());
+				if (data === "\x1b" || data === "q") {
+					done(undefined);
+					return;
+				}
+				if (data === "j" || data === "\x1b[B") {
+					scrollOffset = Math.min(maxScroll, scrollOffset + 1);
+					stick = scrollOffset >= maxScroll;
+				} else if (data === "k" || data === "\x1b[A") {
+					scrollOffset = Math.max(0, scrollOffset - 1);
+					stick = false;
+				} else if (data === " ") {
+					scrollOffset = Math.min(maxScroll, scrollOffset + viewport());
+					stick = scrollOffset >= maxScroll;
+				}
+				tui.requestRender();
+			},
+			invalidate(): void {},
+			dispose(): void {
+				overlay = null;
+			},
+		};
+		overlay = {
+			requestRender: () => tui.requestRender(),
+			close: () => {
+				done(undefined);
+			},
+		};
+		return component;
+	}, { overlay: true });
 }

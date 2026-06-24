@@ -28,9 +28,12 @@ omp -e ./extensions/parallelaudit.ts
 
 ```text
 /observe            # toggle the live thought panel (above the editor)
+/observe full       # full-page, scrollable view of the whole thought log
 ```
 
-The panel docks above the editor and shows the monitor's latest thoughts (a live tail of the last few lines), so you can keep working in the main editor while glancing at it. It auto-follows the newest output — there's no manual scroll, and it stays out of the way until you toggle it off with `/observe` again. It's non-modal, so it never grabs keyboard focus.
+The panel docks above the editor and shows the monitor's latest thoughts (a live tail of the last few lines), so you can keep working in the main editor while glancing at it. It auto-follows the newest output and stays out of the way until you toggle it off with `/observe` again. It's non-modal, so it never grabs keyboard focus.
+
+`/observe full` opens a modal with the **entire** log when you want more than the tail — `j`/`k` (or arrows) scroll, `space` pages, `Esc`/`q` closes. It sticks to the tail while the monitor streams unless you scroll up.
 
 ### Monitor model
 

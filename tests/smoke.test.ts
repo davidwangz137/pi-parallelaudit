@@ -14,6 +14,7 @@ type LifecycleHandler = () => void;
 
 let turnEnd: TurnHandler | undefined;
 let sessionStart: LifecycleHandler | undefined;
+let monitorListener: ((ev: unknown) => void) | undefined;
 let observeRegistered = false;
 
 const promptCalls: string[] = [];
@@ -23,7 +24,8 @@ const { promise: promptDone, resolve: resolvePrompt } = Promise.withResolvers<vo
 let createCalls = 0;
 
 const fakeSession = {
-	subscribe() {
+	subscribe(fn: (ev: unknown) => void) {
+		monitorListener = fn;
 		return () => {};
 	},
 	prompt(text: string) {
@@ -90,5 +92,15 @@ describe("parallelaudit wiring", () => {
 		expect(promptCalls).toHaveLength(1);
 		expect(promptCalls[0]).toContain("### Session update");
 		expect(promptCalls[0]).toContain("hello world");
+
+		// Regression: handleMonitorEvent once referenced a removed `overlay`
+		// variable and crashed on the first monitor stream. Drive real events
+		// through the captured listener (live/buffer plumbing + repaint path).
+		expect(monitorListener).toBeDefined();
+		const assistantMsg = { role: "assistant", content: [{ type: "text", text: "a thought" }] };
+		expect(() => {
+			monitorListener?.({ type: "message_update", message: assistantMsg });
+			monitorListener?.({ type: "message_end", message: assistantMsg });
+		}).not.toThrow();
 	});
 });
