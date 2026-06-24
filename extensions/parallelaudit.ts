@@ -238,6 +238,7 @@ export default function parallelaudit(pi: ExtensionAPI): void {
 				ctx.ui.notify("parallelaudit: no UI in this mode.", "info");
 				return;
 			}
+			ctx.ui.setEditorText("");
 			if (args.trim() === "full") {
 				primeIfNeeded(pi, ctx);
 				await openFullView(pi, ctx);
