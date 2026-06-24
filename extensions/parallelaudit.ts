@@ -18,6 +18,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@oh-my-pi/pi-coding-agent";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { renderDelta } from "./delta";
 
 const MONITOR_SYSTEM_PROMPT = [
@@ -40,6 +41,7 @@ let consecutiveFailures = 0;
 
 const buffer: string[] = [];
 let overlay: { requestRender: () => void; close: () => void } | null = null;
+const live: string[] = []; // current streaming message, rebuilt in place each message_update
 
 function pushLine(line: string): void {
 	buffer.push(line);
@@ -52,6 +54,7 @@ function pushLine(line: string): void {
 function resetState(): void {
 	buffer.length = 0;
 	cursor = 0;
+	live.length = 0;
 	monitorBusy = false;
 	pendingDelta = null;
 	consecutiveFailures = 0;
@@ -108,20 +111,37 @@ async function ensureMonitor(pi: ExtensionAPI, ctx: ExtensionContext): Promise<A
 	}
 }
 
-function handleMonitorEvent(ev: AgentSessionEvent): void {
-	if (ev.type !== "message_update" && ev.type !== "message_end") return;
-	const msg = ev.message;
+/** Push an assistant message's thinking/text blocks into `target`. The caller
+ *  resets `target` first, so repeated calls with the cumulative `message_update`
+ *  payload replace lines in place instead of stacking growing prefixes. */
+function appendAssistantLines(target: string[], msg: AgentMessage): void {
 	if (msg.role !== "assistant") return;
 	for (const block of msg.content) {
 		if (block.type === "thinking") {
 			const t = block.thinking.trimEnd();
-			if (t) pushLine(`  ${t}`);
+			if (t) target.push(`  ${t}`);
 		} else if (block.type === "text") {
 			const t = block.text.trimEnd();
-			if (t) pushLine(t);
+			if (t) target.push(t);
 		}
 	}
-	if (ev.type === "message_end") pushLine("");
+}
+
+function handleMonitorEvent(ev: AgentSessionEvent): void {
+	if (ev.type === "message_update") {
+		// ev.message is the cumulative partial: rebuild `live` so a growing token
+		// stream replaces its line rather than appending every prefix.
+		live.length = 0;
+		appendAssistantLines(live, ev.message);
+		overlay?.requestRender();
+		return;
+	}
+	if (ev.type === "message_end") {
+		appendAssistantLines(buffer, ev.message);
+		if (ev.message.role === "assistant") pushLine("");
+		live.length = 0;
+		overlay?.requestRender();
+	}
 }
 
 /** Fire-and-forget: never blocks the primary turn_end handler. */
@@ -202,25 +222,30 @@ async function openOverlay(ctx: ExtensionContext): Promise<void> {
 	// our floating component) and never pushes its own overlay.
 	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
 		let scrollOffset = 0;
+		let lastMaxScroll = 0;
 		let handle: { hide(): void } | undefined;
 		const viewport = (): number => Math.max(4, Math.floor((process.stdout.rows ?? 40) * 0.68) - 1);
 
 		const floating = {
 			render(width: number): readonly string[] {
 				const cols = Math.max(20, width);
+				const total = buffer.length + live.length;
 				const header =
 					theme.fg("accent", "parallelaudit") +
 					theme.fg(
 						"dim",
-						` ${monitorLabel || "no monitor yet"} · ${buffer.length} lines · Esc/q close · j/k/space scroll`,
+						` ${monitorLabel || "no monitor yet"} · ${total} lines · Esc/q close · j/k/space scroll`,
 					);
 				const lines =
-					buffer.length > 0
-						? buffer.slice()
+					total > 0
+						? [...buffer, ...live]
 						: [theme.fg("dim", "(no thoughts yet — the monitor speaks after the primary's first turn)")];
 				const maxScroll = Math.max(0, lines.length - viewport());
+				// Stick to the tail while streaming if we were already at the bottom.
+				if (scrollOffset >= lastMaxScroll) scrollOffset = maxScroll;
 				if (scrollOffset > maxScroll) scrollOffset = maxScroll;
 				if (scrollOffset < 0) scrollOffset = 0;
+				lastMaxScroll = maxScroll;
 				return [
 					header,
 					...lines.slice(scrollOffset, scrollOffset + viewport()).map(s =>
@@ -229,7 +254,7 @@ async function openOverlay(ctx: ExtensionContext): Promise<void> {
 				];
 			},
 			handleInput(data: string): void {
-				const maxScroll = Math.max(0, buffer.length - viewport());
+				const maxScroll = Math.max(0, buffer.length + live.length - viewport());
 				if (data === "\x1b" || data === "q") {
 					handle?.hide();
 					overlay = null;
