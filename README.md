@@ -35,12 +35,20 @@ The panel docks above the editor and shows the monitor's latest thoughts (a live
 
 `/observe full` opens a modal with the **entire** log when you want more than the tail — `j`/`k` (or arrows) scroll, `space` pages, `Esc`/`q` closes. It sticks to the tail while the monitor streams unless you scroll up.
 
-### Monitor model
+### Configuration
 
-By default the monitor uses **gpt-5.5** (openai-codex). Override it with an env var (any string `ctx.models.resolve` accepts — provider/id, bare id, or role alias); if the chosen model can't be resolved it falls back to the primary session's model:
+| Env var | Default | Purpose |
+|---|---|---|
+| `PARALLELAUDIT_MODEL` | `gpt-5.5` | Monitor model (any string `ctx.models.resolve` accepts — `provider/id`, bare id, or role alias). Falls back to the primary session's model if it can't be resolved. |
+
+The monitor always runs at **medium** thinking intensity (hardcoded in `ensureMonitor`). The `:high`/`:low` suffix on the model string is stripped by `ctx.models.resolve` and has no effect — to change it, edit `thinkingLevel` in `extensions/parallelaudit.ts`.
 
 ```bash
-PARALLELAUDIT_MODEL="openai-codex/gpt-5.5:medium" omp -e ./extensions/parallelaudit.ts
+# use a different model
+PARALLELAUDIT_MODEL="zai/glm-5.1" omp -e ./extensions/parallelaudit.ts
+
+# resume a session with a specific monitor model
+PARALLELAUDIT_MODEL="fireworks/kimi-k2.7-code" omp -r <session-id>
 ```
 
 ## Behavior
