@@ -22,6 +22,7 @@ let observeCommand: { description: string; handler: CommandHandler } | undefined
 const promptCalls: string[] = [];
 const { promise: promptDone, resolve: resolvePrompt } = Promise.withResolvers<void>();
 let createCalls = 0;
+let createArgs: Record<string, unknown> | undefined;
 
 const fakeSession = {
 	subscribe(fn: (ev: unknown) => void) {
@@ -57,8 +58,9 @@ const pi = {
 		buildSessionContext(entries: { message: AgentMessage }[]) {
 			return { messages: entries.map(e => e.message) };
 		},
-		createAgentSession() {
+		createAgentSession(options: Record<string, unknown>) {
 			createCalls += 1;
+			createArgs = options;
 			return Promise.resolve({ session: fakeSession });
 		},
 	},
@@ -137,6 +139,11 @@ describe("turn_end feed", () => {
 		expect(createCalls).toBeGreaterThanOrEqual(1);
 		expect(promptCalls[0]).toContain("### Session update");
 		expect(promptCalls[0]).toContain("hello world");
+		expect(createArgs).toMatchObject({
+			disableExtensionDiscovery: true,
+			additionalExtensionPaths: [],
+			tools: ["read", "search", "find"],
+		});
 	});
 
 	it("handles streaming events without crashing (regression: removed overlay ref)", () => {

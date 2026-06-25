@@ -110,7 +110,12 @@ async function ensureMonitor(pi: ExtensionAPI, ctx: ExtensionContext): Promise<A
 			systemPrompt: [MONITOR_SYSTEM_PROMPT],
 			tools: ["read", "search", "find"],
 			sessionManager: pi.pi.SessionManager.inMemory(),
-			// Skip every discovery path — the monitor needs none of it.
+			// Critical: the monitor session must not load filesystem/user
+			// extensions (including parallelaudit itself), or its own turn_end would
+			// feed the monitor transcript back into itself and create a feedback loop.
+			disableExtensionDiscovery: true,
+			additionalExtensionPaths: [],
+			// Skip every other discovery path — the monitor needs none of it.
 			contextFiles: [],
 			skills: [],
 			slashCommands: [],
