@@ -43,6 +43,33 @@ interface PendingDelta {
 	label: string | null;
 }
 
+/** Lightweight index alongside buffer dividers — no event interception, just
+ *  a read-only projection used by the stacked compare view. */
+interface TurnSource {
+	label: string;
+	source: string;
+}
+
+/** Detect quota / rate-limit / auth errors from a thrown error string. */
+function isQuotaError(errStr: string): boolean {
+	const lower = errStr.toLowerCase();
+	return (
+		lower.includes("quota") ||
+		lower.includes("rate_limit") ||
+		lower.includes("rate limit") ||
+		lower.includes("insufficient") ||
+		lower.includes("429") ||
+		lower.includes("resource_exhausted") ||
+		lower.includes("resource exhausted") ||
+		lower.includes("payment required") ||
+		lower.includes("billing") ||
+		lower.includes("unauthorized") ||
+		lower.includes("invalid api key") ||
+		lower.includes("no api key") ||
+		lower.includes("permission_denied")
+	);
+}
+
 /** Human-readable label for a turn: `HH:MM:SS · first user snippet`. */
 function describeTurn(messages: readonly AgentMessage[]): string | null {
 	const user = messages.find(msg => msg.role === "user");
@@ -79,6 +106,8 @@ let widgetRequestRender: (() => void) | null = null;
 let widgetForceRender: (() => void) | null = null;
 let overlay: { requestRender: () => void; close: () => void } | null = null;
 const live: string[] = []; // current streaming message, rebuilt in place each message_update
+const turnSources: TurnSource[] = [];
+let monitorQuotaExceeded = false;
 
 function pushLine(line: string): void {
 	buffer.push(line);
@@ -97,10 +126,13 @@ function requestActiveRender(): void {
 function resetState(): void {
 	buffer.length = 0;
 	live.length = 0;
+	turnSources.length = 0;
+	monitorQuotaExceeded = false;
 	monitorBusy = false;
 	pendingDeltas.length = 0;
 	consecutiveFailures = 0;
 	monitorPrimed = false;
+	cursor = 0;
 }
 
 /** Abort any live monitor and reset session-scoped state. Used on both
@@ -206,30 +238,37 @@ function feed(pi: ExtensionAPI, ctx: ExtensionContext, pending: PendingDelta): v
 }
 
 async function runTurn(pi: ExtensionAPI, session: AgentSession, pending: PendingDelta): Promise<void> {
+	if (monitorQuotaExceeded) return;
 	monitorBusy = true;
-	// Human-readable live boundary: time + first user snippet of the turn.
 	const suffix = pending.label ? ` · ${pending.label}` : "";
-	pushLine(`\n━━━ turn${suffix} ━━━`);
+	const label = `turn${suffix}`;
+	pushLine(`\n━━━ ${label} ━━━`);
+	turnSources.push({ label, source: pending.text });
 	try {
 		await session.prompt(`### Session update\n\n${pending.text}`);
 		consecutiveFailures = 0;
 	} catch (err) {
-		consecutiveFailures++;
-		pi.logger.debug("parallelaudit monitor turn failed", {
-			err: String(err),
-			consecutiveFailures,
-		});
-		if (consecutiveFailures >= 3) {
-			// A turn that keeps failing would loop forever; shed it and let the
-			// queue drain onward. (Only a failing turn is ever dropped.)
-			pi.logger.warn("parallelaudit monitor failed 3x on a turn; dropping it and continuing");
-			consecutiveFailures = 0;
+		const errStr = String(err);
+		if (isQuotaError(errStr)) {
+			monitorQuotaExceeded = true;
+			pendingDeltas.length = 0;
+			pushLine("\n⛔ **Monitor stopped: out of quota or auth error.**");
+			pushLine(`Error: ${errStr}`);
+			pushLine("Set PARALLELAUDIT_MODEL to a different provider and restart.");
+			pi.logger.warn("parallelaudit monitor quota exceeded", { err: errStr });
 		} else {
-			pendingDeltas.unshift(pending); // retry this exact turn next
+			consecutiveFailures++;
+			pi.logger.debug("parallelaudit monitor turn failed", { err: errStr, consecutiveFailures });
+			if (consecutiveFailures >= 3) {
+				pi.logger.warn("parallelaudit monitor failed 3x; dropping");
+				consecutiveFailures = 0;
+			} else {
+				pendingDeltas.unshift(pending);
+			}
 		}
 	} finally {
 		const next = pendingDeltas.shift();
-		if (next) {
+		if (next && !monitorQuotaExceeded) {
 			await runTurn(pi, session, next);
 		} else {
 			monitorBusy = false;
@@ -243,8 +282,19 @@ async function runTurn(pi: ExtensionAPI, session: AgentSession, pending: Pending
 function feedCurrentDelta(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	const { messages } = pi.pi.buildSessionContext(ctx.sessionManager.getBranch());
 	const slice = messages.slice(cursor);
-	const { text, nextCount } = renderDelta(messages, cursor);
-	cursor = nextCount;
+	cursor = messages.length;
+	// If the delta spans multiple user messages (e.g. backlog after resume
+	// before /observe had a chance to replay), chunk and feed each turn
+	// individually so the stacked compare view shows proper per-turn entries.
+	const userCount = slice.filter(m => m.role === "user").length;
+	if (userCount > 1) {
+		for (const chunk of chunkByTurn(slice)) {
+			const { text } = renderDelta(chunk, 0);
+			if (text) feed(pi, ctx, { text, label: describeTurn(chunk) });
+		}
+		return;
+	}
+	const { text } = renderDelta(slice, 0);
 	if (text) feed(pi, ctx, { text, label: describeTurn(slice) });
 }
 
@@ -266,16 +316,21 @@ export default function parallelaudit(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", () => disposeMonitor("session shutdown"));
 
 	pi.registerCommand("observe", {
-		description: "Toggle the live thought panel; `/observe full` opens a full-page scrollable view.",
+		description: "Toggle the live panel; `/observe full` for scrollable view, `/observe full-stacked` for compare view.",
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("parallelaudit: no UI in this mode.", "info");
 				return;
 			}
 			ctx.ui.setEditorText("");
-			if (args.trim() === "full") {
+			if (monitorQuotaExceeded) {
+				ctx.ui.notify("parallelaudit: monitor is stopped (quota/auth error). Set PARALLELAUDIT_MODEL and restart.", "warning");
+			}
+			const trimmed = args.trim();
+			if (trimmed === "full" || trimmed === "full-stacked" || trimmed === "stacked") {
 				primeIfNeeded(pi, ctx);
-				await openFullView(pi, ctx);
+				const mode = trimmed.includes("stacked") ? "stacked" : "audit";
+				await openFullView(pi, ctx, mode);
 				return;
 			}
 			if (widgetOn) {
@@ -375,16 +430,29 @@ function replayTranscript(pi: ExtensionAPI, ctx: ExtensionContext): void {
 			return;
 		}
 		for (let i = 0; i < turns.length; i++) {
+			if (monitorQuotaExceeded) break;
 			const turn = turns[i]!;
 			const suffix = turn.label ? ` · ${turn.label}` : "";
-			pushLine(`\n━━━ replay ${i + 1}/${turns.length}${suffix} ━━━`);
+			const label = `replay ${i + 1}/${turns.length}${suffix}`;
+			pushLine(`\n━━━ ${label} ━━━`);
+			turnSources.push({ label, source: turn.text });
 			try {
 				await session.prompt(
 					`### Session update (replay ${i + 1}/${turns.length})\n\n${turn.text}`,
 				);
 				consecutiveFailures = 0;
 			} catch (err) {
-				pi.logger.debug("parallelaudit replay chunk failed", { err: String(err) });
+				const errStr = String(err);
+				if (isQuotaError(errStr)) {
+					monitorQuotaExceeded = true;
+					pendingDeltas.length = 0;
+					pushLine("\n⛔ **Monitor stopped: out of quota or auth error.**");
+					pushLine(`Error: ${errStr}`);
+					pushLine("Set PARALLELAUDIT_MODEL to a different provider and restart.");
+					pi.logger.warn("parallelaudit monitor quota exceeded during replay", { err: errStr });
+					break;
+				}
+				pi.logger.debug("parallelaudit replay chunk failed", { err: errStr });
 			}
 		}
 		// Drain any live deltas that arrived during replay, preserving their own
@@ -399,31 +467,142 @@ function replayTranscript(pi: ExtensionAPI, ctx: ExtensionContext): void {
 }
 
 
-/** Full-page, scrollable modal of the whole thought log. Renders markdown and
- *  sticks to the tail while streaming unless you scroll up. */
-async function openFullView(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+/** Full-page, scrollable modal. Two modes: 'audit' (the full audit log) and
+ *  'stacked' (per-turn compare: primary transcript chunk then audit text).
+ *  Press v to toggle. The stacked view reads turnSources + slices buffer between
+ *  dividers — no parallel event state, just a read-only projection. */
+async function openFullView(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	initialMode: "audit" | "stacked" = "audit",
+): Promise<void> {
 	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
 		let scrollOffset = 0;
 		let stick = true;
 		let lastRenderedLength = 0;
+		let viewMode: "audit" | "stacked" = initialMode;
 		const bodyViewport = (): number => Math.max(4, (process.stdout.rows ?? 40) - 8);
 		const markdown = new pi.pi.Markdown("", 1, 0, pi.pi.getMarkdownTheme());
+
+		/** Color a divider string: section word (blue/green), N/M numbers (pink). */
+		const colorDivider = (section: string, label: string): string => {
+			const sectionColor = section === "primary" ? "accent" : "success";
+			const coloredLabel = label.replace(
+				/(\d+\/\d+)/g,
+				match => theme.fg("mdHeading", match),
+			);
+			return `━━━ ${theme.fg(sectionColor, section)} · ${coloredLabel} ━━━`;
+		};
+
+		/** Build stacked compare lines. Returns { lines, contexts } where contexts
+		 *  maps body-line indices to {turn, section} for the sticky header. */
+		const renderStacked = (width: number): { lines: string[]; contexts: Map<number, { turn: string; section: string }> } => {
+			if (turnSources.length === 0) {
+				return { lines: [theme.fg("dim", "(no turns yet...)")], contexts: new Map() };
+			}
+			const dividerIdx: number[] = [];
+			for (let i = 0; i < buffer.length; i++) {
+				if (buffer[i]!.includes("━━━")) dividerIdx.push(i);
+			}
+			const lines: string[] = [];
+			const contexts = new Map<number, { turn: string; section: string }>();
+			for (let i = 0; i < turnSources.length; i++) {
+				const ts = turnSources[i]!;
+				const isLast = i === turnSources.length - 1;
+				lines.push(colorDivider("primary", ts.label));
+				contexts.set(lines.length - 1, { turn: ts.label, section: "primary" });
+				const srcMd = new pi.pi.Markdown(ts.source, 1, 0, pi.pi.getMarkdownTheme());
+				for (const line of srcMd.render(width)) {
+					lines.push(line);
+					contexts.set(lines.length - 1, { turn: ts.label, section: "primary" });
+				}
+				lines.push("");
+				let auditLines: string[];
+				if (isLast && live.length > 0) {
+					auditLines = [...live];
+				} else {
+					const start = dividerIdx[i] ?? buffer.length;
+					const end = dividerIdx[i + 1] ?? buffer.length;
+					auditLines = buffer.slice(start + 1, end).filter(l => l.trim() !== "");
+				}
+				lines.push(colorDivider("audit", ts.label));
+				contexts.set(lines.length - 1, { turn: ts.label, section: "audit" });
+				if (auditLines.length > 0) {
+					const audMd = new pi.pi.Markdown(auditLines.join("\n"), 1, 0, pi.pi.getMarkdownTheme());
+					for (const line of audMd.render(width)) {
+						lines.push(line);
+						contexts.set(lines.length - 1, { turn: ts.label, section: "audit" });
+					}
+				} else {
+					lines.push(theme.fg("dim", "(waiting for audit...)"));
+					contexts.set(lines.length - 1, { turn: ts.label, section: "audit" });
+				}
+				lines.push("");
+				lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.max(1, width))));
+				lines.push("");
+			}
+			return { lines, contexts };
+		};
+
+		/** Scan rendered lines for ━━━ markers to build a context map (audit mode). */
+		const buildAuditContexts = (rendered: readonly string[]): Map<number, { turn: string; section: string }> => {
+			const contexts = new Map<number, { turn: string; section: string }>();
+			let currentTurn = "";
+			for (let i = 0; i < rendered.length; i++) {
+				const line = rendered[i]!;
+				if (line.includes("━━━")) {
+					// Extract the label from between ━━━ markers.
+					const match = line.match(/━━━\s*(.+?)\s*━━━/);
+					if (match) currentTurn = match[1]!.replace(/\x1b\[[0-9;]*m/g, "").trim();
+					contexts.set(i, { turn: currentTurn, section: "audit" });
+				} else if (currentTurn) {
+					contexts.set(i, { turn: currentTurn, section: "audit" });
+				}
+			}
+			return contexts;
+		};
 
 		const component = {
 			render(width: number): readonly string[] {
 				const border = theme.fg("dim", theme.boxRound.horizontal.repeat(Math.max(1, width)));
 				const all = [...buffer, ...live];
 				const title =
-					theme.fg("accent", "parallelaudit full") +
-					theme.fg("dim", ` · ${monitorLabel || "no monitor yet"} · ${all.length} lines`);
-				const footer = theme.fg("muted", "pgup/pgdn page · j/k line · Esc dismiss");
+					theme.fg("accent", `parallelaudit full · ${viewMode}`) +
+					theme.fg(
+						"dim",
+						viewMode === "audit"
+							? ` · ${monitorLabel || "no monitor yet"} · ${all.length} lines`
+							: ` · ${monitorLabel || "no monitor yet"} · ${turnSources.length} turns`,
+					);
+				const footer = theme.fg("muted", "v toggle · pgup/pgdn · j/k · Esc dismiss");
 
-				markdown.setText(
-					all.length > 0
-						? all.join("\n\n")
-						: "(no thoughts yet — the monitor speaks after the primary's first turn)",
-				);
-				const rendered = [...markdown.render(width)];
+				let rendered: string[];
+				let contextLine = "";
+				let contexts: Map<number, { turn: string; section: string }> = new Map();
+				if (viewMode === "audit") {
+					markdown.setText(
+						all.length > 0
+							? all.join("\n\n")
+							: "(no thoughts yet — the monitor speaks after the primary's first turn)",
+					);
+					rendered = [...markdown.render(width)];
+					contexts = buildAuditContexts(rendered);
+				} else {
+					const result = renderStacked(width);
+					rendered = result.lines;
+					contexts = result.contexts;
+				}
+
+				// Sticky context: find which turn/section the top visible body line is in.
+				const bodyTop = scrollOffset;
+				for (let i = bodyTop; i >= 0; i--) {
+					const c = contexts.get(i);
+					if (c) {
+						contextLine = colorDivider(c.section, c.turn);
+						break;
+					}
+				}
+
 				lastRenderedLength = rendered.length;
 				const maxScroll = Math.max(0, rendered.length - bodyViewport());
 				if (stick) scrollOffset = maxScroll;
@@ -432,17 +611,10 @@ async function openFullView(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
 				const body = rendered.slice(scrollOffset, scrollOffset + bodyViewport());
 				while (body.length < bodyViewport()) body.push("");
 
-				return [
-					border,
-					"",
-					title,
-					"",
-					...body,
-					"",
-					footer,
-					"",
-					border,
-				];
+				if (contextLine) {
+					return [border, "", title, contextLine, "", ...body, "", footer, "", border];
+				}
+				return [border, "", title, "", ...body, "", footer, "", border];
 			},
 			handleInput(data: string): void {
 				const maxScroll = Math.max(0, lastRenderedLength - bodyViewport());
@@ -450,6 +622,12 @@ async function openFullView(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
 				const isPageDown = data === "\x1b[6~" || data === "\x1b[[6~";
 				if (data === "\x1b" || data === "q") {
 					done(undefined);
+					return;
+				}
+				if (data === "v") {
+					viewMode = viewMode === "audit" ? "stacked" : "audit";
+					stick = true;
+					tui.requestRender();
 					return;
 				}
 				if (data === "j" || data === "\x1b[B") {
@@ -472,19 +650,13 @@ async function openFullView(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
 			},
 			dispose(): void {
 				overlay = null;
-				// Modal close is a structural viewport change; repaint cleanly so the
-				// old prompt line doesn't linger under the restored transcript/editor.
 				queueMicrotask(() => tui.requestRender(true));
 			},
 		};
 		overlay = {
 			requestRender: () => tui.requestRender(),
-			close: () => {
-				done(undefined);
-			},
+			close: () => { done(undefined); },
 		};
-		// Opening the modal also replaces the viewport structure; force one clean
-		// repaint after mount rather than relying on a diff paint.
 		queueMicrotask(() => tui.requestRender(true));
 		return component;
 	}, { overlay: true });

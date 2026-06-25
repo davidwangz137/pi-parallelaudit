@@ -68,6 +68,8 @@ Everything runs on public extension APIs — no omp internals:
 
 All `@oh-my-pi/*` imports are type-only (erased at runtime), so the module loads from any location without package resolution.
 
+For detailed architecture, chunking, async handling, and test coverage, see [ARCHITECTURE.md](./ARCHITECTURE.md).
+
 ## Tuning
 
 - **Lighter resume:** to make the monitor start *blind* (only new turns, no full-history re-prime) instead of seeding the cursor to 0 on `session_start`, seed it to the current transcript length in the `turn_end` handler.
