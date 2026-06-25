@@ -24,6 +24,9 @@ const { promise: promptDone, resolve: resolvePrompt } = Promise.withResolvers<vo
 let createCalls = 0;
 let createArgs: Record<string, unknown> | undefined;
 
+let promptTarget = 0;
+let promptTargetResolve: (() => void) | null = null;
+
 const fakeSession = {
 	subscribe(fn: (ev: unknown) => void) {
 		monitorListener = fn;
@@ -32,6 +35,12 @@ const fakeSession = {
 	prompt(text: string) {
 		promptCalls.push(text);
 		resolvePrompt();
+		if (promptTargetResolve && promptCalls.length >= promptTarget) {
+			const resolve = promptTargetResolve;
+			promptTargetResolve = null;
+			promptTarget = 0;
+			resolve();
+		}
 		return Promise.resolve(true);
 	},
 	abort() {
@@ -67,6 +76,14 @@ const pi = {
 };
 
 const transcript = [{ message: { role: "user", content: "hello world", timestamp: 1 } }];
+
+function waitForPromptCount(count: number): Promise<void> {
+	if (promptCalls.length >= count) return Promise.resolve();
+	const { promise, resolve } = Promise.withResolvers<void>();
+	promptTarget = count;
+	promptTargetResolve = resolve;
+	return promise;
+}
 
 /** Build a spy-rich ctx so tests can assert on setWidget/setEditorText/custom. */
 function makeCtx(overrides: Record<string, unknown> = {}) {
@@ -208,5 +225,25 @@ describe("/observe command", () => {
 		// the call site incorrectly, this throws "X is not defined."
 		await expect(observeCommand!.handler("", fixture.ctx)).resolves.toBeUndefined();
 		await expect(observeCommand!.handler("full", fixture.ctx)).resolves.toBeUndefined();
+	});
+
+	it("replays one prompt per user turn when /observe primes a resumed session", async () => {
+		await reset();
+		const baseline = promptCalls.length;
+		const turns = [
+			{ message: { role: "user", content: "first", timestamp: 1 } },
+			{ message: { role: "assistant", content: [{ type: "text", text: "reply1" }], timestamp: 2 } },
+			{ message: { role: "user", content: "second", timestamp: 3 } },
+			{ message: { role: "assistant", content: [{ type: "text", text: "reply2" }], timestamp: 4 } },
+		];
+		const fixture = makeCtx({ sessionManager: { getBranch: () => turns } });
+		const done = waitForPromptCount(baseline + 2);
+		await observeCommand!.handler("", fixture.ctx);
+		await done;
+
+		const newCalls = promptCalls.slice(baseline);
+		expect(newCalls).toHaveLength(2);
+		expect(newCalls[0]).toContain("replay 1/2");
+		expect(newCalls[1]).toContain("replay 2/2");
 	});
 });

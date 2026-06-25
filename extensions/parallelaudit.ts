@@ -11,7 +11,7 @@
  * import — it loads from any location without package resolution. Types are
  * type-only (erased at runtime).
  */
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { Model, TextContent } from "@oh-my-pi/pi-ai";
 import type {
 	AgentSession,
 	AgentSessionEvent,
@@ -37,12 +37,38 @@ const WIDGET_KEY = "parallelaudit";
 /** Lines of thought kept visible in the live panel (a tail — newest only). */
 const WIDGET_HEIGHT = 12;
 
+interface PendingDelta {
+	text: string;
+	label: string | null;
+}
+
+/** Human-readable label for a turn: `HH:MM:SS · first user snippet`. */
+function describeTurn(messages: readonly AgentMessage[]): string | null {
+	const user = messages.find(msg => msg.role === "user");
+	const anchor = user ?? messages[0];
+	const parts: string[] = [];
+	if (anchor?.timestamp) {
+		parts.push(new Date(anchor.timestamp).toLocaleTimeString());
+	}
+	if (user) {
+		const raw =
+			typeof user.content === "string"
+				? user.content
+				: user.content.filter((b): b is TextContent => b.type === "text").map(b => b.text).join("");
+		const oneLine = raw.replace(/\s+/g, " ").trim();
+		if (oneLine) {
+			parts.push(oneLine.length > 72 ? oneLine.slice(0, 69) + "…" : oneLine);
+		}
+	}
+	return parts.length > 0 ? parts.join(" · ") : null;
+}
+
 // ── session-scoped state (reset on session_start / shutdown) ─────────────
 let monitor: AgentSession | null = null;
 let monitorLabel = "";
 let cursor = 0; // last-seen primary message count
 let monitorBusy = false;
-const pendingDeltas: string[] = []; // queued transcript slices, drained as one coalesced batch
+const pendingDeltas: PendingDelta[] = [];
 let consecutiveFailures = 0;
 let monitorPrimed = false; // true once the monitor has been fed anything this session
 
@@ -165,24 +191,26 @@ function handleMonitorEvent(ev: AgentSessionEvent): void {
 }
 
 /** Fire-and-forget: never blocks the primary turn_end handler. */
-function feed(pi: ExtensionAPI, ctx: ExtensionContext, delta: string): void {
+function feed(pi: ExtensionAPI, ctx: ExtensionContext, pending: PendingDelta): void {
 	monitorPrimed = true;
 	void (async () => {
 		const session = await ensureMonitor(pi, ctx);
 		if (!session) return;
 		if (monitorBusy) {
-			pendingDeltas.push(delta);
+			pendingDeltas.push(pending);
 			return;
 		}
-		await runTurn(pi, session, delta);
+		await runTurn(pi, session, pending);
 	})();
 }
 
-async function runTurn(pi: ExtensionAPI, session: AgentSession, delta: string): Promise<void> {
+async function runTurn(pi: ExtensionAPI, session: AgentSession, pending: PendingDelta): Promise<void> {
 	monitorBusy = true;
-	pushLine(`\n━━━ turn ${new Date().toLocaleTimeString()} ━━━`);
+	// Human-readable live boundary: time + first user snippet of the turn.
+	const suffix = pending.label ? ` · ${pending.label}` : "";
+	pushLine(`\n━━━ turn${suffix} ━━━`);
 	try {
-		await session.prompt(`### Session update\n\n${delta}`);
+		await session.prompt(`### Session update\n\n${pending.text}`);
 		consecutiveFailures = 0;
 	} catch (err) {
 		consecutiveFailures++;
@@ -191,19 +219,17 @@ async function runTurn(pi: ExtensionAPI, session: AgentSession, delta: string): 
 			consecutiveFailures,
 		});
 		if (consecutiveFailures >= 3) {
-			// A batch that keeps failing would loop forever; shed it and let the
-			// queue drain onward. (Only a failing batch is ever dropped.)
-			pi.logger.warn("parallelaudit monitor failed 3x on a batch; dropping it and continuing");
+			// A turn that keeps failing would loop forever; shed it and let the
+			// queue drain onward. (Only a failing turn is ever dropped.)
+			pi.logger.warn("parallelaudit monitor failed 3x on a turn; dropping it and continuing");
 			consecutiveFailures = 0;
 		} else {
-			pendingDeltas.unshift(delta); // retry this batch on the next drain
+			pendingDeltas.unshift(pending); // retry this exact turn next
 		}
 	} finally {
-		if (pendingDeltas.length > 0) {
-			// Drain the whole queue as one coalesced batch: a slow monitor
-			// catches up in fewer, larger prompts instead of dropping turns.
-			const batch = pendingDeltas.splice(0).join("\n\n");
-			await runTurn(pi, session, batch);
+		const next = pendingDeltas.shift();
+		if (next) {
+			await runTurn(pi, session, next);
 		} else {
 			monitorBusy = false;
 		}
@@ -212,12 +238,13 @@ async function runTurn(pi: ExtensionAPI, session: AgentSession, delta: string): 
 
 /** Build the transcript delta since `cursor` and feed it to the monitor,
  *  advancing the cursor whether or not there was anything to show. Shared by
- *  turn_end and the /observe "prime now" path. */
+ *  turn_end and the /observe replay/drain path. */
 function feedCurrentDelta(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	const { messages } = pi.pi.buildSessionContext(ctx.sessionManager.getBranch());
+	const slice = messages.slice(cursor);
 	const { text, nextCount } = renderDelta(messages, cursor);
 	cursor = nextCount;
-	if (text) feed(pi, ctx, text);
+	if (text) feed(pi, ctx, { text, label: describeTurn(slice) });
 }
 
 export default function parallelaudit(pi: ExtensionAPI): void {
@@ -330,10 +357,13 @@ function replayTranscript(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	void (async () => {
 		const { messages } = pi.pi.buildSessionContext(ctx.sessionManager.getBranch());
 		cursor = messages.length;
-		const chunks = chunkByTurn(messages)
-			.map(chunk => renderDelta(chunk, 0).text)
-			.filter((t): t is string => t !== null);
-		if (chunks.length === 0) {
+		const turns = chunkByTurn(messages)
+			.map(chunk => {
+				const { text } = renderDelta(chunk, 0);
+				return text ? { text, label: describeTurn(chunk) } : null;
+			})
+			.filter((t): t is PendingDelta => t !== null);
+		if (turns.length === 0) {
 			monitorBusy = false;
 			return;
 		}
@@ -343,32 +373,37 @@ function replayTranscript(pi: ExtensionAPI, ctx: ExtensionContext): void {
 			pendingDeltas.length = 0;
 			return;
 		}
-		for (let i = 0; i < chunks.length; i++) {
-			const chunk = chunks[i];
+		for (let i = 0; i < turns.length; i++) {
+			const turn = turns[i]!;
+			const suffix = turn.label ? ` · ${turn.label}` : "";
+			pushLine(`\n━━━ replay ${i + 1}/${turns.length}${suffix} ━━━`);
 			pi.logger.debug("parallelaudit replay chunk", {
 				index: i + 1,
-				total: chunks.length,
-				chars: chunk.length,
-				preview: chunk.slice(0, 120),
+				total: turns.length,
+				chars: turn.text.length,
+				preview: turn.text.slice(0, 120),
+				label: turn.label,
 			});
 			try {
 				await session.prompt(
-					`### Session update (replay ${i + 1}/${chunks.length})\n\n${chunk}`,
+					`### Session update (replay ${i + 1}/${turns.length})\n\n${turn.text}`,
 				);
 				consecutiveFailures = 0;
 			} catch (err) {
 				pi.logger.debug("parallelaudit replay chunk failed", { err: String(err) });
 			}
 		}
-		// Drain any live deltas that arrived during replay.
-		if (pendingDeltas.length > 0) {
-			const batch = pendingDeltas.splice(0).join("\n\n");
-			await runTurn(pi, session, batch);
+		// Drain any live deltas that arrived during replay, preserving their own
+		// turn boundaries one by one.
+		const next = pendingDeltas.shift();
+		if (next) {
+			await runTurn(pi, session, next);
 		} else {
 			monitorBusy = false;
 		}
 	})();
 }
+
 
 /** Full-page, scrollable modal of the whole thought log. Renders markdown and
  *  sticks to the tail while streaming unless you scroll up. */
