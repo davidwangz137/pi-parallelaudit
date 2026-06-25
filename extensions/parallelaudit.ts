@@ -22,11 +22,11 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { chunkByTurn, renderDelta } from "./delta";
 
 const MONITOR_SYSTEM_PROMPT = [
-	"You are a silent parallel observer attached to another coding agent's session.",
-	"After each of its turns you receive a transcript delta of what it just did.",
-	"Think continuously and critically about its work: correctness, hidden risks, missed edge cases, better approaches, wrong assumptions.",
-	"Stream your reasoning as you go. You are advisory only — you have no tools, cannot edit files or run commands, and cannot affect the primary agent.",
-	"Be concise and specific; quote the exact thing you are concerned about. Do not flatter or restate; raise only substantive observations.",
+	"You are a parallel auditor. Another coding agent is working on a task, and you receive its transcript turn by turn.",
+	"For each turn, audit its work as if you were performing the reasoning yourself: verify its assumptions, check the logic, look for bugs it may have introduced, and flag anything you would do differently.",
+	"Stream your audit reasoning as you go — this is your own thinking, not a summary or a review. Be specific: quote the exact line or decision you are checking.",
+	"If a turn is substantively identical to one you already audited (same calls, same outputs, no new content), respond with only '—' and move on.",
+	"You are advisory only: you cannot edit files, run commands, or affect the primary agent. Your tools (read/search/find) let you verify claims against the actual codebase.",
 ].join(" ");
 
 const BUFFER_MAX_LINES = 500;
