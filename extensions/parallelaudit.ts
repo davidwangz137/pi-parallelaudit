@@ -338,9 +338,18 @@ function replayTranscript(pi: ExtensionAPI, ctx: ExtensionContext): void {
 			pendingDeltas.length = 0;
 			return;
 		}
-		for (const chunk of chunks) {
+		for (let i = 0; i < chunks.length; i++) {
+			const chunk = chunks[i];
+			pi.logger.debug("parallelaudit replay chunk", {
+				index: i + 1,
+				total: chunks.length,
+				chars: chunk.length,
+				preview: chunk.slice(0, 120),
+			});
 			try {
-				await session.prompt(`### Session update\n\n${chunk}`);
+				await session.prompt(
+					`### Session update (replay ${i + 1}/${chunks.length})\n\n${chunk}`,
+				);
 				consecutiveFailures = 0;
 			} catch (err) {
 				pi.logger.debug("parallelaudit replay chunk failed", { err: String(err) });
