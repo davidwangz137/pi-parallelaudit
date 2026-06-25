@@ -20,12 +20,8 @@ let monitorListener: ((ev: unknown) => void) | undefined;
 let observeCommand: { description: string; handler: CommandHandler } | undefined;
 
 const promptCalls: string[] = [];
-const { promise: promptDone, resolve: resolvePrompt } = Promise.withResolvers<void>();
 let createCalls = 0;
 let createArgs: Record<string, unknown> | undefined;
-
-let promptTarget = 0;
-let promptTargetResolve: (() => void) | null = null;
 
 const fakeSession = {
 	subscribe(fn: (ev: unknown) => void) {
@@ -34,13 +30,6 @@ const fakeSession = {
 	},
 	prompt(text: string) {
 		promptCalls.push(text);
-		resolvePrompt();
-		if (promptTargetResolve && promptCalls.length >= promptTarget) {
-			const resolve = promptTargetResolve;
-			promptTargetResolve = null;
-			promptTarget = 0;
-			resolve();
-		}
 		return Promise.resolve(true);
 	},
 	abort() {
@@ -75,14 +64,15 @@ const pi = {
 	},
 };
 
-const transcript = [{ message: { role: "user", content: "hello world", timestamp: 1 } }];
+let transcript: { message: AgentMessage }[] = [];
 
-function waitForPromptCount(count: number): Promise<void> {
-	if (promptCalls.length >= count) return Promise.resolve();
-	const { promise, resolve } = Promise.withResolvers<void>();
-	promptTarget = count;
-	promptTargetResolve = resolve;
-	return promise;
+/** Wait until promptCalls reaches the target count, polling microtasks. */
+async function flushToPrompts(target: number): Promise<void> {
+	let guard = 0;
+	while (promptCalls.length < target && guard < 500) {
+		await Promise.resolve();
+		guard++;
+	}
 }
 
 /** Build a spy-rich ctx so tests can assert on setWidget/setEditorText/custom. */
@@ -121,10 +111,12 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
 	};
 }
 
-/** Reset module state between tests (disposeMonitor runs async, flush microtasks). */
+/** Reset module state between tests. */
 async function reset(): Promise<void> {
 	sessionShutdown?.();
-	await Promise.resolve();
+	// disposeMonitor is void async — its IIFE + any pending runTurn chains
+	// from the previous test need many microtask hops to fully drain.
+	for (let i = 0; i < 50; i++) await Promise.resolve();
 }
 
 parallelaudit(pi as unknown as ExtensionAPI);
@@ -150,8 +142,9 @@ describe("registration", () => {
 describe("turn_end feed", () => {
 	it("creates a monitor session and feeds the transcript delta", async () => {
 		await reset();
+		transcript = [{ message: { role: "user", content: "hello world", timestamp: 1 } }];
 		turnEnd?.({}, makeCtx().ctx);
-		await promptDone;
+		await flushToPrompts(promptCalls.length + 1);
 
 		expect(createCalls).toBeGreaterThanOrEqual(1);
 		expect(promptCalls[0]).toContain("### Session update");
@@ -194,8 +187,6 @@ describe("/observe command", () => {
 		await observeCommand!.handler("", fixture.ctx);
 
 		expect(fixture.widgetCalls).toHaveLength(2);
-		// Two calls alternate between show (factory) and hide (undefined),
-		// regardless of whether widgetOn started true or false.
 		const types = fixture.widgetCalls.map(c => c.content !== undefined);
 		expect(types[0]).not.toBe(types[1]);
 	});
@@ -230,8 +221,6 @@ describe("/observe command", () => {
 	it("does not throw even if internal functions are misordered (regression)", async () => {
 		await reset();
 		const fixture = makeCtx();
-		// If showWidget/hideWidget/openFullView were commented out or moved below
-		// the call site incorrectly, this throws "X is not defined."
 		await expect(observeCommand!.handler("", fixture.ctx)).resolves.toBeUndefined();
 		await expect(observeCommand!.handler("full", fixture.ctx)).resolves.toBeUndefined();
 	});
@@ -246,13 +235,99 @@ describe("/observe command", () => {
 			{ message: { role: "assistant", content: [{ type: "text", text: "reply2" }], timestamp: 4 } },
 		];
 		const fixture = makeCtx({ sessionManager: { getBranch: () => turns } });
-		const done = waitForPromptCount(baseline + 2);
-		await observeCommand!.handler("", fixture.ctx);
-		await done;
+		await observeCommand!.handler("full", fixture.ctx);
+		await flushToPrompts(baseline + 2);
 
 		const newCalls = promptCalls.slice(baseline);
 		expect(newCalls).toHaveLength(2);
 		expect(newCalls[0]).toContain("replay 1/2");
 		expect(newCalls[1]).toContain("replay 2/2");
+	});
+});
+
+// ── Resume + extend scenarios ────────────────────────────────────────
+
+/** Helper: build a transcript with N user+assistant turns. */
+function makeTurns(n: number): { message: AgentMessage }[] {
+	const entries: { message: AgentMessage }[] = [];
+	for (let i = 0; i < n; i++) {
+		entries.push({ message: { role: "user", content: `question ${i + 1}`, timestamp: i * 100 + 1 } });
+		entries.push({ message: { role: "assistant", content: [{ type: "text", text: `answer ${i + 1}` }], timestamp: i * 100 + 2 } });
+	}
+	return entries;
+}
+
+describe("resume + extend scenarios", () => {
+	it("resume 3 turns → /observe full replays 3 chunks", async () => {
+		await reset();
+		transcript = makeTurns(3);
+		const baseline = promptCalls.length;
+		const fixture = makeCtx();
+		await observeCommand!.handler("full", fixture.ctx);
+		await flushToPrompts(baseline + 3);
+
+		const calls = promptCalls.slice(baseline);
+		expect(calls).toHaveLength(3);
+		expect(calls[0]).toContain("replay 1/3");
+		expect(calls[1]).toContain("replay 2/3");
+		expect(calls[2]).toContain("replay 3/3");
+	});
+
+	it("resume 2 turns → /observe full → live turn_end feeds 1 more", async () => {
+		await reset();
+		transcript = makeTurns(2);
+		const baseline = promptCalls.length;
+		const fixture = makeCtx();
+		await observeCommand!.handler("full", fixture.ctx);
+		await flushToPrompts(baseline + 2);
+
+		transcript = makeTurns(3);
+		turnEnd?.({}, fixture.ctx);
+		await flushToPrompts(baseline + 3);
+
+		const calls = promptCalls.slice(baseline);
+		expect(calls).toHaveLength(3);
+		expect(calls[0]).toContain("replay 1/2");
+		expect(calls[1]).toContain("replay 2/2");
+		expect(calls[2]).not.toContain("replay");
+		expect(calls[2]).toContain("question 3");
+	});
+
+	it("resume → turn_end with 4-turn backlog chunks all 4 individually", async () => {
+		await reset();
+		transcript = makeTurns(4);
+		const baseline = promptCalls.length;
+		const fixture = makeCtx();
+		turnEnd?.({}, fixture.ctx);
+		await flushToPrompts(baseline + 4);
+
+		const calls = promptCalls.slice(baseline);
+		expect(calls).toHaveLength(4);
+		expect(calls[0]).toContain("question 1");
+		expect(calls[1]).toContain("question 2");
+		expect(calls[2]).toContain("question 3");
+		expect(calls[3]).toContain("question 4");
+		for (const call of calls) {
+			const qCount = (call.match(/question \d/g) ?? []).length;
+			expect(qCount).toBe(1);
+		}
+	});
+
+	it("resume → /observe full (2 turns) → extend + turn_end → /observe full (no re-replay)", async () => {
+		await reset();
+		transcript = makeTurns(2);
+		const baseline = promptCalls.length;
+		const fixture = makeCtx();
+
+		await observeCommand!.handler("full", fixture.ctx);
+		await flushToPrompts(baseline + 2);
+
+		transcript = makeTurns(3);
+		turnEnd?.({}, fixture.ctx);
+		await flushToPrompts(baseline + 3);
+
+		const beforeSecond = promptCalls.length;
+		await observeCommand!.handler("full", fixture.ctx);
+		expect(promptCalls.length).toBe(beforeSecond);
 	});
 });

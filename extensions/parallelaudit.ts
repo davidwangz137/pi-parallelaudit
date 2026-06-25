@@ -132,6 +132,7 @@ function resetState(): void {
 	pendingDeltas.length = 0;
 	consecutiveFailures = 0;
 	monitorPrimed = false;
+	cursor = 0;
 }
 
 /** Abort any live monitor and reset session-scoped state. Used on both
