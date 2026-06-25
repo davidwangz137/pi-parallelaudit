@@ -200,10 +200,25 @@ function handleMonitorEvent(ev: AgentSessionEvent): void {
 	}
 	if (ev.type === "message_end") {
 		appendAssistantLines(buffer, ev.message);
+		// Only commit the active turn when the monitor produces actual audit text
+		// — NOT when it's just emitting tool calls (which also fire message_end
+		// with role "assistant"). The real audit text comes in a follow-up
+		// assistant message after tool results return.
 		if (activeTurn && ev.message.role === "assistant") {
-			activeTurn.audit = assistantAuditText(ev.message);
-			turnHistory.push(activeTurn);
-			activeTurn = null;
+			const audit = assistantAuditText(ev.message);
+			if (audit) {
+				activeTurn.audit = audit;
+			}
+			// Don't commit yet if this message has tool calls but no text — the
+			// real audit will come in the next message_end.
+			const hasToolCalls =
+				Array.isArray(ev.message.content) &&
+				ev.message.content.some(b => b.type === "toolCall");
+			const hasText = audit.length > 0;
+			if (hasText || !hasToolCalls) {
+				turnHistory.push(activeTurn);
+				activeTurn = null;
+			}
 		}
 		live.length = 0;
 		if (ev.message.role === "assistant") pushLine("");
