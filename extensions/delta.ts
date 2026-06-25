@@ -136,3 +136,20 @@ export function renderDelta(messages: readonly AgentMessage[], lastCount: number
 		nextCount: messages.length,
 	};
 }
+
+/** Split messages into per-turn chunks — each user message starts a new turn.
+ *  Consecutive non-user messages (assistant replies, tool results, custom
+ *  context) stay grouped with the user message that preceded them. */
+export function chunkByTurn(messages: readonly AgentMessage[]): readonly AgentMessage[][] {
+	const chunks: AgentMessage[][] = [];
+	let current: AgentMessage[] = [];
+	for (const msg of messages) {
+		if (msg.role === "user" && current.length > 0) {
+			chunks.push(current);
+			current = [];
+		}
+		current.push(msg);
+	}
+	if (current.length > 0) chunks.push(current);
+	return chunks;
+}

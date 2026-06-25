@@ -19,7 +19,7 @@ import type {
 	ExtensionContext,
 } from "@oh-my-pi/pi-coding-agent";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { renderDelta } from "./delta";
+import { chunkByTurn, renderDelta } from "./delta";
 
 const MONITOR_SYSTEM_PROMPT = [
 	"You are a silent parallel observer attached to another coding agent's session.",
@@ -304,15 +304,56 @@ function hideWidget(ctx: ExtensionContext): void {
 	force?.();
 }
 
-/** Prime the monitor with the current transcript if it hasn't run this session
- *  (so /observe yields a second opinion immediately, even right after resume). */
+/** Prime the monitor if it hasn't run this session. Instead of feeding the
+ *  whole transcript as one blob (which makes the model summarize), splits it
+ *  into per-turn chunks and replays each so the monitor comments on each turn
+ *  individually — as if /observe had been open from the start of the session. */
 function primeIfNeeded(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	if (monitorPrimed) return;
 	try {
-		feedCurrentDelta(pi, ctx);
+		replayTranscript(pi, ctx);
 	} catch (err) {
 		pi.logger.debug("parallelaudit observe prime error", { err: String(err) });
 	}
+}
+
+/** Replay the full transcript as per-turn chunks, holding monitorBusy so live
+ *  turn_end deltas queue behind the replay rather than interleaving. */
+function replayTranscript(pi: ExtensionAPI, ctx: ExtensionContext): void {
+	monitorPrimed = true;
+	monitorBusy = true; // hold busy until replay finishes
+	void (async () => {
+		const { messages } = pi.pi.buildSessionContext(ctx.sessionManager.getBranch());
+		cursor = messages.length;
+		const chunks = chunkByTurn(messages)
+			.map(chunk => renderDelta(chunk, 0).text)
+			.filter((t): t is string => t !== null);
+		if (chunks.length === 0) {
+			monitorBusy = false;
+			return;
+		}
+		const session = await ensureMonitor(pi, ctx);
+		if (!session) {
+			monitorBusy = false;
+			pendingDeltas.length = 0;
+			return;
+		}
+		for (const chunk of chunks) {
+			try {
+				await session.prompt(`### Session update\n\n${chunk}`);
+				consecutiveFailures = 0;
+			} catch (err) {
+				pi.logger.debug("parallelaudit replay chunk failed", { err: String(err) });
+			}
+		}
+		// Drain any live deltas that arrived during replay.
+		if (pendingDeltas.length > 0) {
+			const batch = pendingDeltas.splice(0).join("\n\n");
+			await runTurn(pi, session, batch);
+		} else {
+			monitorBusy = false;
+		}
+	})();
 }
 
 /** Full-page, scrollable modal of the whole thought log. Renders markdown and

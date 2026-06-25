@@ -7,7 +7,7 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { renderDelta, renderMessage } from "../extensions/delta";
+import { chunkByTurn, renderDelta, renderMessage } from "../extensions/delta";
 
 const ZERO_USAGE: Usage = {
 	input: 0,
@@ -191,5 +191,31 @@ describe("renderDelta", () => {
 		expect(first.text).toContain("old");
 		expect(first.text).toContain("new");
 		expect(second.text).toBe("**user**: newer");
+	});
+});
+
+describe("chunkByTurn", () => {
+	it("splits messages into per-turn chunks at user messages", () => {
+		const messages: AgentMessage[] = [
+			user("first"), assistant([{ type: "text", text: "reply1" }]),
+			user("second"), assistant([{ type: "text", text: "reply2" }]), toolResult("bash", "ok"),
+		];
+		const chunks = chunkByTurn(messages);
+		expect(chunks).toHaveLength(2);
+		expect(chunks[0]).toHaveLength(2);
+		expect(chunks[1]).toHaveLength(3);
+	});
+
+	it("returns an empty array for no messages", () => {
+		expect(chunkByTurn([])).toHaveLength(0);
+	});
+
+	it("groups consecutive non-user messages into the current chunk", () => {
+		const messages: AgentMessage[] = [
+			user("go"), assistant([{ type: "text", text: "a" }]), toolResult("edit", "done"),
+		];
+		const chunks = chunkByTurn(messages);
+		expect(chunks).toHaveLength(1);
+		expect(chunks[0]).toHaveLength(3);
 	});
 });
