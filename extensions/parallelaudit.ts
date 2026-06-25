@@ -281,8 +281,19 @@ async function runTurn(pi: ExtensionAPI, session: AgentSession, pending: Pending
 function feedCurrentDelta(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	const { messages } = pi.pi.buildSessionContext(ctx.sessionManager.getBranch());
 	const slice = messages.slice(cursor);
-	const { text, nextCount } = renderDelta(messages, cursor);
-	cursor = nextCount;
+	cursor = messages.length;
+	// If the delta spans multiple user messages (e.g. backlog after resume
+	// before /observe had a chance to replay), chunk and feed each turn
+	// individually so the stacked compare view shows proper per-turn entries.
+	const userCount = slice.filter(m => m.role === "user").length;
+	if (userCount > 1) {
+		for (const chunk of chunkByTurn(slice)) {
+			const { text } = renderDelta(chunk, 0);
+			if (text) feed(pi, ctx, { text, label: describeTurn(chunk) });
+		}
+		return;
+	}
+	const { text } = renderDelta(slice, 0);
 	if (text) feed(pi, ctx, { text, label: describeTurn(slice) });
 }
 
