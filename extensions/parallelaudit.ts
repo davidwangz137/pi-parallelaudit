@@ -132,7 +132,7 @@ async function ensureMonitor(pi: ExtensionAPI, ctx: ExtensionContext): Promise<A
 			cwd: ctx.cwd,
 			model,
 			modelRegistry: ctx.modelRegistry,
-			thinkingLevel: "medium",
+			thinkingLevel: (process.env.PARALLELAUDIT_THINKING as "minimal" | "low" | "medium" | "high" | "xhigh" | undefined) ?? "medium",
 			systemPrompt: [MONITOR_SYSTEM_PROMPT],
 			tools: ["read", "search", "find"],
 			sessionManager: pi.pi.SessionManager.inMemory(),

@@ -40,15 +40,14 @@ The panel docks above the editor and shows the monitor's latest thoughts (a live
 | Env var | Default | Purpose |
 |---|---|---|
 | `PARALLELAUDIT_MODEL` | `gpt-5.5` | Monitor model (any string `ctx.models.resolve` accepts — `provider/id`, bare id, or role alias). Falls back to the primary session's model if it can't be resolved. |
-
-The monitor always runs at **medium** thinking intensity (hardcoded in `ensureMonitor`). The `:high`/`:low` suffix on the model string is stripped by `ctx.models.resolve` and has no effect — to change it, edit `thinkingLevel` in `extensions/parallelaudit.ts`.
+| `PARALLELAUDIT_THINKING` | `medium` | Monitor thinking intensity: `minimal`, `low`, `medium`, `high`, or `xhigh`. The `:high`/`:low` suffix on the model string is stripped by `ctx.models.resolve` and has no effect — use this env var instead. |
 
 ```bash
 # use a different model
 PARALLELAUDIT_MODEL="zai/glm-5.1" omp -e ./extensions/parallelaudit.ts
 
-# resume a session with a specific monitor model
-PARALLELAUDIT_MODEL="fireworks/kimi-k2.7-code" omp -r <session-id>
+# resume a session with a specific monitor model + high thinking
+PARALLELAUDIT_MODEL="fireworks/kimi-k2.7-code" PARALLELAUDIT_THINKING="high" omp -r <session-id>
 ```
 
 ## Behavior
