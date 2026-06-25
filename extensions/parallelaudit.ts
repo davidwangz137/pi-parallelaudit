@@ -472,42 +472,61 @@ async function openFullView(
 		const bodyViewport = (): number => Math.max(4, (process.stdout.rows ?? 40) - 8);
 		const markdown = new pi.pi.Markdown("", 1, 0, pi.pi.getMarkdownTheme());
 
-		/** Build the stacked compare lines from turnSources + buffer. Each entry
-		 *  shows: divider label, primary markdown, audit markdown. The audit text
-		 *  is the buffer content between this divider and the next. */
-		const renderStacked = (width: number): string[] => {
+		/** Build stacked compare lines. Returns { lines, contexts } where contexts
+		 *  maps body-line indices to {turn, section} for the sticky header. */
+		const renderStacked = (width: number): { lines: string[]; contexts: Map<number, { turn: string; section: string }> } => {
 			if (turnSources.length === 0) {
-				return [theme.fg("dim", "(no turns yet — the monitor speaks after the primary's first turn)")];
+				return { lines: [theme.fg("dim", "(no turns yet...)")], contexts: new Map() };
 			}
-			// Find divider line positions in buffer to slice audit text between them.
+			// Find divider positions in buffer to slice audit text per turn.
 			const dividerIdx: number[] = [];
 			for (let i = 0; i < buffer.length; i++) {
 				if (buffer[i]!.includes("━━━")) dividerIdx.push(i);
 			}
 			const lines: string[] = [];
+			const contexts = new Map<number, { turn: string; section: string }>();
 			for (let i = 0; i < turnSources.length; i++) {
 				const ts = turnSources[i]!;
-				lines.push(theme.fg("accent", ts.label));
+				const isLast = i === turnSources.length - 1;
+				// Use same ━━━ format as audit mode for consistency.
+				lines.push(theme.fg("dim", `━━━ ${ts.label} ━━━`));
+				contexts.set(lines.length - 1, { turn: ts.label, section: "header" });
 				lines.push(theme.fg("muted", "primary:"));
+				contexts.set(lines.length - 1, { turn: ts.label, section: "primary" });
 				const srcMd = new pi.pi.Markdown(ts.source, 1, 0, pi.pi.getMarkdownTheme());
-				lines.push(...srcMd.render(width));
+				for (const line of srcMd.render(width)) {
+					lines.push(line);
+					contexts.set(lines.length - 1, { turn: ts.label, section: "primary" });
+				}
 				lines.push("");
-				// Audit text = buffer lines after this divider up to the next (or end).
-				const start = dividerIdx[i] ?? buffer.length;
-				const end = dividerIdx[i + 1] ?? buffer.length;
-				const auditLines = buffer.slice(start + 1, end).filter(l => l.trim() !== "");
+				// Audit text: buffer lines after this divider up to the next, OR
+				// live[] for the in-progress last turn (streaming).
+				let auditLines: string[];
+				if (isLast && live.length > 0) {
+					// Show streamed partial audit for the active turn.
+					auditLines = [...live];
+				} else {
+					const start = dividerIdx[i] ?? buffer.length;
+					const end = dividerIdx[i + 1] ?? buffer.length;
+					auditLines = buffer.slice(start + 1, end).filter(l => l.trim() !== "");
+				}
 				lines.push(theme.fg("muted", "audit:"));
+				contexts.set(lines.length - 1, { turn: ts.label, section: "audit" });
 				if (auditLines.length > 0) {
 					const audMd = new pi.pi.Markdown(auditLines.join("\n"), 1, 0, pi.pi.getMarkdownTheme());
-					lines.push(...audMd.render(width));
+					for (const line of audMd.render(width)) {
+						lines.push(line);
+						contexts.set(lines.length - 1, { turn: ts.label, section: "audit" });
+					}
 				} else {
 					lines.push(theme.fg("dim", "(waiting for audit...)"));
+					contexts.set(lines.length - 1, { turn: ts.label, section: "audit" });
 				}
 				lines.push("");
 				lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.max(1, width))));
 				lines.push("");
 			}
-			return lines;
+			return { lines, contexts };
 		};
 
 		const component = {
@@ -525,6 +544,7 @@ async function openFullView(
 				const footer = theme.fg("muted", "v toggle · pgup/pgdn · j/k · Esc dismiss");
 
 				let rendered: string[];
+				let contextLine = "";
 				if (viewMode === "audit") {
 					markdown.setText(
 						all.length > 0
@@ -533,7 +553,23 @@ async function openFullView(
 					);
 					rendered = [...markdown.render(width)];
 				} else {
-					rendered = renderStacked(width);
+					const result = renderStacked(width);
+					rendered = result.lines;
+					// Sticky context: find which turn/section the top visible body line is in.
+					const bodyTop = scrollOffset;
+					const ctx = result.contexts.get(bodyTop);
+					if (ctx) {
+						contextLine = theme.fg("accent", ctx.turn) + theme.fg("dim", ` · ${ctx.section}`);
+					} else {
+						// Scan backwards from bodyTop to find the nearest context marker.
+						for (let i = bodyTop; i >= 0; i--) {
+							const c = result.contexts.get(i);
+							if (c) {
+								contextLine = theme.fg("accent", c.turn) + theme.fg("dim", ` · ${c.section}`);
+								break;
+							}
+						}
+					}
 				}
 
 				lastRenderedLength = rendered.length;
@@ -544,6 +580,10 @@ async function openFullView(
 				const body = rendered.slice(scrollOffset, scrollOffset + bodyViewport());
 				while (body.length < bodyViewport()) body.push("");
 
+				// In stacked mode, insert the context line between title and body.
+				if (contextLine) {
+					return [border, "", title, contextLine, "", ...body, "", footer, "", border];
+				}
 				return [border, "", title, "", ...body, "", footer, "", border];
 			},
 			handleInput(data: string): void {
