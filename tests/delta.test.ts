@@ -122,6 +122,20 @@ describe("renderMessage", () => {
 		} as unknown as AgentMessage;
 		expect(renderMessage(ircMsg)).toBeNull();
 	});
+
+	it("renders assistant with only a thinking block", () => {
+		const msg = assistant([{ type: "thinking", thinking: "just thinking" }]);
+		expect(renderMessage(msg)).toBe("> _thinking_: just thinking");
+	});
+
+	it("returns null for assistant with only redacted thinking", () => {
+		const msg = assistant([{ type: "redactedThinking", data: "x" } as never]);
+		expect(renderMessage(msg)).toBeNull();
+	});
+
+	it("returns null for an assistant with empty content", () => {
+		expect(renderMessage(assistant([]))).toBeNull();
+	});
 });
 
 describe("renderDelta", () => {
@@ -154,5 +168,28 @@ describe("renderDelta", () => {
 		];
 		const out = renderDelta(messages, 0);
 		expect(out.text).toBe("**user**: do the thing\n\n**assistant**: done\n\n  ↳ bash: ok");
+	});
+
+	it("returns null for an empty transcript", () => {
+		const out = renderDelta([], 0);
+		expect(out.text).toBeNull();
+		expect(out.nextCount).toBe(0);
+	});
+
+	it("returns null when lastCount equals length (no new messages)", () => {
+		const messages: AgentMessage[] = [user("a"), user("b")];
+		const out = renderDelta(messages, 2);
+		expect(out.text).toBeNull();
+		expect(out.nextCount).toBe(2);
+	});
+
+	it("yields only the new slice on the second call", () => {
+		const messages: AgentMessage[] = [user("old"), user("new")];
+		const first = renderDelta(messages, 0);
+		const grown: AgentMessage[] = [...messages, user("newer")];
+		const second = renderDelta(grown, first.nextCount);
+		expect(first.text).toContain("old");
+		expect(first.text).toContain("new");
+		expect(second.text).toBe("**user**: newer");
 	});
 });
