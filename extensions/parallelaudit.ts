@@ -486,12 +486,10 @@ async function openFullView(
 			const lines: string[] = [];
 			const contexts = new Map<number, { turn: string; section: string }>();
 			for (let i = 0; i < turnSources.length; i++) {
-				const ts = turnSources[i]!;
+			const ts = turnSources[i]!;
 				const isLast = i === turnSources.length - 1;
-				// Use same ━━━ format as audit mode for consistency.
-				lines.push(theme.fg("dim", `━━━ ${ts.label} ━━━`));
-				contexts.set(lines.length - 1, { turn: ts.label, section: "header" });
-				lines.push(theme.fg("muted", "primary:"));
+				// Primary divider — raw string, matches audit mode (no ANSI wrapper).
+				lines.push(`━━━ primary · ${ts.label} ━━━`);
 				contexts.set(lines.length - 1, { turn: ts.label, section: "primary" });
 				const srcMd = new pi.pi.Markdown(ts.source, 1, 0, pi.pi.getMarkdownTheme());
 				for (const line of srcMd.render(width)) {
@@ -503,14 +501,14 @@ async function openFullView(
 				// live[] for the in-progress last turn (streaming).
 				let auditLines: string[];
 				if (isLast && live.length > 0) {
-					// Show streamed partial audit for the active turn.
 					auditLines = [...live];
 				} else {
 					const start = dividerIdx[i] ?? buffer.length;
 					const end = dividerIdx[i + 1] ?? buffer.length;
 					auditLines = buffer.slice(start + 1, end).filter(l => l.trim() !== "");
 				}
-				lines.push(theme.fg("muted", "audit:"));
+				// Audit divider — same format as primary, clearly labels the section.
+				lines.push(`━━━ audit · ${ts.label} ━━━`);
 				contexts.set(lines.length - 1, { turn: ts.label, section: "audit" });
 				if (auditLines.length > 0) {
 					const audMd = new pi.pi.Markdown(auditLines.join("\n"), 1, 0, pi.pi.getMarkdownTheme());
@@ -558,14 +556,13 @@ async function openFullView(
 					// Sticky context: find which turn/section the top visible body line is in.
 					const bodyTop = scrollOffset;
 					const ctx = result.contexts.get(bodyTop);
-					if (ctx) {
-						contextLine = theme.fg("accent", ctx.turn) + theme.fg("dim", ` · ${ctx.section}`);
+				if (ctx) {
+						contextLine = `━━━ ${ctx.section} · ${ctx.turn} ━━━`;
 					} else {
-						// Scan backwards from bodyTop to find the nearest context marker.
 						for (let i = bodyTop; i >= 0; i--) {
 							const c = result.contexts.get(i);
 							if (c) {
-								contextLine = theme.fg("accent", c.turn) + theme.fg("dim", ` · ${c.section}`);
+								contextLine = `━━━ ${c.section} · ${c.turn} ━━━`;
 								break;
 							}
 						}
