@@ -257,6 +257,7 @@ export default function parallelaudit(pi: ExtensionAPI): void {
 
 /** Show the monitor's live tail panel above the editor. Always renders a fixed
  *  height (WIDGET_HEIGHT body rows) to avoid scrollback artifacts from a widget
+ *  that grows while streaming. Uses Markdown so bullets/bold read cleanly. */
 function showWidget(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	ctx.ui.setWidget(WIDGET_KEY, (tui, theme) => {
 		const markdown = new pi.pi.Markdown("", 0, 0, pi.pi.getMarkdownTheme());
