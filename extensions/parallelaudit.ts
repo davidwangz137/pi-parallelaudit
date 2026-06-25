@@ -377,13 +377,6 @@ function replayTranscript(pi: ExtensionAPI, ctx: ExtensionContext): void {
 			const turn = turns[i]!;
 			const suffix = turn.label ? ` · ${turn.label}` : "";
 			pushLine(`\n━━━ replay ${i + 1}/${turns.length}${suffix} ━━━`);
-			pi.logger.debug("parallelaudit replay chunk", {
-				index: i + 1,
-				total: turns.length,
-				chars: turn.text.length,
-				preview: turn.text.slice(0, 120),
-				label: turn.label,
-			});
 			try {
 				await session.prompt(
 					`### Session update (replay ${i + 1}/${turns.length})\n\n${turn.text}`,
