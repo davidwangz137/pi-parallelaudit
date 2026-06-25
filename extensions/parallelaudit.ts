@@ -30,8 +30,9 @@ const MONITOR_SYSTEM_PROMPT = [
 ].join(" ");
 
 const BUFFER_MAX_LINES = 500;
-/** Default monitor model (openai-codex). Override with PARALLELAUDIT_MODEL. */
-const DEFAULT_MONITOR_MODEL = "gpt-5.5";
+/** Default monitor model. gpt-5.4 has a 1M context window — safe for long
+ *  transcripts. Override with PARALLELAUDIT_MODEL. */
+const DEFAULT_MONITOR_MODEL = "gpt-5.4";
 
 const WIDGET_KEY = "parallelaudit";
 /** Lines of thought kept visible in the live panel (a tail — newest only). */
