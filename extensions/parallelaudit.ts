@@ -472,13 +472,22 @@ async function openFullView(
 		const bodyViewport = (): number => Math.max(4, (process.stdout.rows ?? 40) - 8);
 		const markdown = new pi.pi.Markdown("", 1, 0, pi.pi.getMarkdownTheme());
 
+		/** Color a divider string: section word (blue/green), N/M numbers (pink). */
+		const colorDivider = (section: string, label: string): string => {
+			const sectionColor = section === "primary" ? "accent" : "success";
+			const coloredLabel = label.replace(
+				/(\d+\/\d+)/g,
+				match => theme.fg("mdHeading", match),
+			);
+			return `━━━ ${theme.fg(sectionColor, section)} · ${coloredLabel} ━━━`;
+		};
+
 		/** Build stacked compare lines. Returns { lines, contexts } where contexts
 		 *  maps body-line indices to {turn, section} for the sticky header. */
 		const renderStacked = (width: number): { lines: string[]; contexts: Map<number, { turn: string; section: string }> } => {
 			if (turnSources.length === 0) {
 				return { lines: [theme.fg("dim", "(no turns yet...)")], contexts: new Map() };
 			}
-			// Find divider positions in buffer to slice audit text per turn.
 			const dividerIdx: number[] = [];
 			for (let i = 0; i < buffer.length; i++) {
 				if (buffer[i]!.includes("━━━")) dividerIdx.push(i);
@@ -486,10 +495,9 @@ async function openFullView(
 			const lines: string[] = [];
 			const contexts = new Map<number, { turn: string; section: string }>();
 			for (let i = 0; i < turnSources.length; i++) {
-			const ts = turnSources[i]!;
+				const ts = turnSources[i]!;
 				const isLast = i === turnSources.length - 1;
-				// Primary divider — raw string, matches audit mode (no ANSI wrapper).
-				lines.push(`━━━ primary · ${ts.label} ━━━`);
+				lines.push(colorDivider("primary", ts.label));
 				contexts.set(lines.length - 1, { turn: ts.label, section: "primary" });
 				const srcMd = new pi.pi.Markdown(ts.source, 1, 0, pi.pi.getMarkdownTheme());
 				for (const line of srcMd.render(width)) {
@@ -497,8 +505,6 @@ async function openFullView(
 					contexts.set(lines.length - 1, { turn: ts.label, section: "primary" });
 				}
 				lines.push("");
-				// Audit text: buffer lines after this divider up to the next, OR
-				// live[] for the in-progress last turn (streaming).
 				let auditLines: string[];
 				if (isLast && live.length > 0) {
 					auditLines = [...live];
@@ -507,8 +513,7 @@ async function openFullView(
 					const end = dividerIdx[i + 1] ?? buffer.length;
 					auditLines = buffer.slice(start + 1, end).filter(l => l.trim() !== "");
 				}
-				// Audit divider — same format as primary, clearly labels the section.
-				lines.push(`━━━ audit · ${ts.label} ━━━`);
+				lines.push(colorDivider("audit", ts.label));
 				contexts.set(lines.length - 1, { turn: ts.label, section: "audit" });
 				if (auditLines.length > 0) {
 					const audMd = new pi.pi.Markdown(auditLines.join("\n"), 1, 0, pi.pi.getMarkdownTheme());
@@ -527,6 +532,24 @@ async function openFullView(
 			return { lines, contexts };
 		};
 
+		/** Scan rendered lines for ━━━ markers to build a context map (audit mode). */
+		const buildAuditContexts = (rendered: readonly string[]): Map<number, { turn: string; section: string }> => {
+			const contexts = new Map<number, { turn: string; section: string }>();
+			let currentTurn = "";
+			for (let i = 0; i < rendered.length; i++) {
+				const line = rendered[i]!;
+				if (line.includes("━━━")) {
+					// Extract the label from between ━━━ markers.
+					const match = line.match(/━━━\s*(.+?)\s*━━━/);
+					if (match) currentTurn = match[1]!.replace(/\x1b\[[0-9;]*m/g, "").trim();
+					contexts.set(i, { turn: currentTurn, section: "audit" });
+				} else if (currentTurn) {
+					contexts.set(i, { turn: currentTurn, section: "audit" });
+				}
+			}
+			return contexts;
+		};
+
 		const component = {
 			render(width: number): readonly string[] {
 				const border = theme.fg("dim", theme.boxRound.horizontal.repeat(Math.max(1, width)));
@@ -543,6 +566,7 @@ async function openFullView(
 
 				let rendered: string[];
 				let contextLine = "";
+				let contexts: Map<number, { turn: string; section: string }> = new Map();
 				if (viewMode === "audit") {
 					markdown.setText(
 						all.length > 0
@@ -550,22 +574,20 @@ async function openFullView(
 							: "(no thoughts yet — the monitor speaks after the primary's first turn)",
 					);
 					rendered = [...markdown.render(width)];
+					contexts = buildAuditContexts(rendered);
 				} else {
 					const result = renderStacked(width);
 					rendered = result.lines;
-					// Sticky context: find which turn/section the top visible body line is in.
-					const bodyTop = scrollOffset;
-					const ctx = result.contexts.get(bodyTop);
-				if (ctx) {
-						contextLine = `━━━ ${ctx.section} · ${ctx.turn} ━━━`;
-					} else {
-						for (let i = bodyTop; i >= 0; i--) {
-							const c = result.contexts.get(i);
-							if (c) {
-								contextLine = `━━━ ${c.section} · ${c.turn} ━━━`;
-								break;
-							}
-						}
+					contexts = result.contexts;
+				}
+
+				// Sticky context: find which turn/section the top visible body line is in.
+				const bodyTop = scrollOffset;
+				for (let i = bodyTop; i >= 0; i--) {
+					const c = contexts.get(i);
+					if (c) {
+						contextLine = colorDivider(c.section, c.turn);
+						break;
 					}
 				}
 
@@ -577,7 +599,6 @@ async function openFullView(
 				const body = rendered.slice(scrollOffset, scrollOffset + bodyViewport());
 				while (body.length < bodyViewport()) body.push("");
 
-				// In stacked mode, insert the context line between title and body.
 				if (contextLine) {
 					return [border, "", title, contextLine, "", ...body, "", footer, "", border];
 				}
