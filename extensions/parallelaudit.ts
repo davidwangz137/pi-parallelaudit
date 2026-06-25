@@ -42,6 +42,12 @@ interface PendingDelta {
 	label: string | null;
 }
 
+interface AuditTurn {
+	label: string | null;
+	source: string;
+	audit: string;
+}
+
 /** Human-readable label for a turn: `HH:MM:SS · first user snippet`. */
 function describeTurn(messages: readonly AgentMessage[]): string | null {
 	const user = messages.find(msg => msg.role === "user");
@@ -72,6 +78,8 @@ const pendingDeltas: PendingDelta[] = [];
 let consecutiveFailures = 0;
 let monitorPrimed = false; // true once the monitor has been fed anything this session
 
+const turnHistory: AuditTurn[] = [];
+let activeTurn: AuditTurn | null = null;
 const buffer: string[] = [];
 let widgetOn = false;
 let widgetRequestRender: (() => void) | null = null;
@@ -96,6 +104,8 @@ function requestActiveRender(): void {
 function resetState(): void {
 	buffer.length = 0;
 	live.length = 0;
+	turnHistory.length = 0;
+	activeTurn = null;
 	monitorBusy = false;
 	pendingDeltas.length = 0;
 	consecutiveFailures = 0;
@@ -172,6 +182,11 @@ function appendAssistantLines(target: string[], msg: AgentMessage): void {
 		}
 	}
 }
+function assistantAuditText(msg: AgentMessage): string {
+	const lines: string[] = [];
+	appendAssistantLines(lines, msg);
+	return lines.join("\n");
+}
 
 function handleMonitorEvent(ev: AgentSessionEvent): void {
 	if (ev.type === "message_update") {
@@ -179,11 +194,17 @@ function handleMonitorEvent(ev: AgentSessionEvent): void {
 		// stream replaces its line rather than appending every prefix.
 		live.length = 0;
 		appendAssistantLines(live, ev.message);
+		if (activeTurn) activeTurn.audit = assistantAuditText(ev.message);
 		requestActiveRender();
 		return;
 	}
 	if (ev.type === "message_end") {
 		appendAssistantLines(buffer, ev.message);
+		if (activeTurn && ev.message.role === "assistant") {
+			activeTurn.audit = assistantAuditText(ev.message);
+			turnHistory.push(activeTurn);
+			activeTurn = null;
+		}
 		live.length = 0;
 		if (ev.message.role === "assistant") pushLine("");
 		else requestActiveRender();
@@ -208,12 +229,15 @@ async function runTurn(pi: ExtensionAPI, session: AgentSession, pending: Pending
 	monitorBusy = true;
 	// Human-readable live boundary: time + first user snippet of the turn.
 	const suffix = pending.label ? ` · ${pending.label}` : "";
-	pushLine(`\n━━━ turn${suffix} ━━━`);
+	const label = `turn${suffix}`;
+	pushLine(`\n━━━ ${label} ━━━`);
+	activeTurn = { label, source: pending.text, audit: "" };
 	try {
 		await session.prompt(`### Session update\n\n${pending.text}`);
 		consecutiveFailures = 0;
 	} catch (err) {
 		consecutiveFailures++;
+		activeTurn = null;
 		pi.logger.debug("parallelaudit monitor turn failed", {
 			err: String(err),
 			consecutiveFailures,
@@ -265,16 +289,18 @@ export default function parallelaudit(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", () => disposeMonitor("session shutdown"));
 
 	pi.registerCommand("observe", {
-		description: "Toggle the live thought panel; `/observe full` opens a full-page scrollable view.",
+		description: "Toggle the live thought panel; `/observe full` opens a full-page view and `/observe full-stacked` opens the compare view.",
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("parallelaudit: no UI in this mode.", "info");
 				return;
 			}
 			ctx.ui.setEditorText("");
-			if (args.trim() === "full") {
+			const trimmed = args.trim();
+			if (trimmed === "full" || trimmed === "full-stacked" || trimmed === "stacked") {
 				primeIfNeeded(pi, ctx);
-				await openFullView(pi, ctx);
+				const initialMode = trimmed.includes("stacked") ? "stacked" : "audit";
+				await openFullView(pi, ctx, initialMode);
 				return;
 			}
 			if (widgetOn) {
@@ -376,13 +402,16 @@ function replayTranscript(pi: ExtensionAPI, ctx: ExtensionContext): void {
 		for (let i = 0; i < turns.length; i++) {
 			const turn = turns[i]!;
 			const suffix = turn.label ? ` · ${turn.label}` : "";
-			pushLine(`\n━━━ replay ${i + 1}/${turns.length}${suffix} ━━━`);
+			const label = `replay ${i + 1}/${turns.length}${suffix}`;
+			pushLine(`\n━━━ ${label} ━━━`);
+			activeTurn = { label, source: turn.text, audit: "" };
 			try {
 				await session.prompt(
 					`### Session update (replay ${i + 1}/${turns.length})\n\n${turn.text}`,
 				);
 				consecutiveFailures = 0;
 			} catch (err) {
+				activeTurn = null;
 				pi.logger.debug("parallelaudit replay chunk failed", { err: String(err) });
 			}
 		}
@@ -400,29 +429,68 @@ function replayTranscript(pi: ExtensionAPI, ctx: ExtensionContext): void {
 
 /** Full-page, scrollable modal of the whole thought log. Renders markdown and
  *  sticks to the tail while streaming unless you scroll up. */
-async function openFullView(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+async function openFullView(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	initialMode: "audit" | "stacked" = "audit",
+): Promise<void> {
 	await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
 		let scrollOffset = 0;
 		let stick = true;
 		let lastRenderedLength = 0;
+		let viewMode: "audit" | "stacked" = initialMode;
 		const bodyViewport = (): number => Math.max(4, (process.stdout.rows ?? 40) - 8);
 		const markdown = new pi.pi.Markdown("", 1, 0, pi.pi.getMarkdownTheme());
+
+		const renderStackedCompare = (width: number): string[] => {
+			const entries = [...turnHistory, ...(activeTurn ? [activeTurn] : [])];
+			if (entries.length === 0) {
+				return [theme.fg("dim", "(no turns yet — the monitor speaks after the primary's first turn)")];
+			}
+			const lines: string[] = [];
+			for (const entry of entries) {
+				lines.push(theme.fg("accent", entry.label ?? "turn"));
+				lines.push(theme.fg("muted", "primary:"));
+				const sourceMd = new pi.pi.Markdown(entry.source, 1, 0, pi.pi.getMarkdownTheme());
+				lines.push(...sourceMd.render(width));
+				lines.push("");
+				lines.push(theme.fg("muted", "audit:"));
+				const auditMd = new pi.pi.Markdown(entry.audit || "(waiting for audit...)", 1, 0, pi.pi.getMarkdownTheme());
+				lines.push(...auditMd.render(width));
+				lines.push("");
+				lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.max(1, width))));
+				lines.push("");
+			}
+			return lines;
+		};
 
 		const component = {
 			render(width: number): readonly string[] {
 				const border = theme.fg("dim", theme.boxRound.horizontal.repeat(Math.max(1, width)));
 				const all = [...buffer, ...live];
+				const entries = [...turnHistory, ...(activeTurn ? [activeTurn] : [])];
 				const title =
-					theme.fg("accent", "parallelaudit full") +
-					theme.fg("dim", ` · ${monitorLabel || "no monitor yet"} · ${all.length} lines`);
-				const footer = theme.fg("muted", "pgup/pgdn page · j/k line · Esc dismiss");
+					theme.fg("accent", `parallelaudit full · ${viewMode}`) +
+					theme.fg(
+						"dim",
+						viewMode === "audit"
+							? ` · ${monitorLabel || "no monitor yet"} · ${all.length} lines`
+							: ` · ${monitorLabel || "no monitor yet"} · ${entries.length} turns`,
+					);
+				const footer = theme.fg("muted", "v toggle view · pgup/pgdn page · j/k line · Esc dismiss");
 
-				markdown.setText(
-					all.length > 0
-						? all.join("\n\n")
-						: "(no thoughts yet — the monitor speaks after the primary's first turn)",
-				);
-				const rendered = [...markdown.render(width)];
+				let rendered: string[];
+				if (viewMode === "audit") {
+					markdown.setText(
+						all.length > 0
+							? all.join("\n\n")
+							: "(no thoughts yet — the monitor speaks after the primary's first turn)",
+					);
+					rendered = [...markdown.render(width)];
+				} else {
+					rendered = renderStackedCompare(width);
+				}
+
 				lastRenderedLength = rendered.length;
 				const maxScroll = Math.max(0, rendered.length - bodyViewport());
 				if (stick) scrollOffset = maxScroll;
@@ -449,6 +517,12 @@ async function openFullView(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
 				const isPageDown = data === "\x1b[6~" || data === "\x1b[[6~";
 				if (data === "\x1b" || data === "q") {
 					done(undefined);
+					return;
+				}
+				if (data === "v") {
+					viewMode = viewMode === "audit" ? "stacked" : "audit";
+					stick = true;
+					tui.requestRender();
 					return;
 				}
 				if (data === "j" || data === "\x1b[B") {

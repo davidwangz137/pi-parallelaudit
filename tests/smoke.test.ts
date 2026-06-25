@@ -209,6 +209,15 @@ describe("/observe command", () => {
 		expect(fixture.editorCalls).toContain("");
 	});
 
+	it("opens the stacked compare modal on /observe full-stacked", async () => {
+		await reset();
+		const fixture = makeCtx();
+		await observeCommand!.handler("full-stacked", fixture.ctx);
+
+		expect(fixture.customCalls).toHaveLength(1);
+		expect(fixture.editorCalls).toContain("");
+	});
+
 	it("notifies when no UI is available", async () => {
 		await reset();
 		const fixture = makeCtx({ hasUI: false });
