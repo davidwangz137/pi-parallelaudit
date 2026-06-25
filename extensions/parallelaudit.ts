@@ -405,33 +405,48 @@ async function openFullView(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
 		let scrollOffset = 0;
 		let stick = true;
 		let lastRenderedLength = 0;
-		const viewport = (): number => Math.max(4, (process.stdout.rows ?? 40) - 3);
-		const markdown = new pi.pi.Markdown("", 0, 0, pi.pi.getMarkdownTheme());
+		const bodyViewport = (): number => Math.max(4, (process.stdout.rows ?? 40) - 8);
+		const markdown = new pi.pi.Markdown("", 1, 0, pi.pi.getMarkdownTheme());
 
 		const component = {
 			render(width: number): readonly string[] {
+				const border = theme.fg("dim", theme.boxRound.horizontal.repeat(Math.max(1, width)));
 				const all = [...buffer, ...live];
-				const header =
-					theme.fg("accent", "parallelaudit") +
-					theme.fg(
-						"dim",
-						` ${monitorLabel || "no monitor yet"} · ${all.length} lines · Esc/q close · j/k/space scroll`,
-					);
+				const title =
+					theme.fg("accent", "parallelaudit full") +
+					theme.fg("dim", ` · ${monitorLabel || "no monitor yet"} · ${all.length} lines`);
+				const footer = theme.fg("muted", "pgup/pgdn page · j/k line · Esc dismiss");
+
 				markdown.setText(
 					all.length > 0
 						? all.join("\n\n")
 						: "(no thoughts yet — the monitor speaks after the primary's first turn)",
 				);
-				const lines = [...markdown.render(width)];
-				lastRenderedLength = lines.length;
-				const maxScroll = Math.max(0, lines.length - viewport());
+				const rendered = [...markdown.render(width)];
+				lastRenderedLength = rendered.length;
+				const maxScroll = Math.max(0, rendered.length - bodyViewport());
 				if (stick) scrollOffset = maxScroll;
 				if (scrollOffset > maxScroll) scrollOffset = maxScroll;
 				if (scrollOffset < 0) scrollOffset = 0;
-				return [header, ...lines.slice(scrollOffset, scrollOffset + viewport())];
+				const body = rendered.slice(scrollOffset, scrollOffset + bodyViewport());
+				while (body.length < bodyViewport()) body.push("");
+
+				return [
+					border,
+					"",
+					title,
+					"",
+					...body,
+					"",
+					footer,
+					"",
+					border,
+				];
 			},
 			handleInput(data: string): void {
-				const maxScroll = Math.max(0, lastRenderedLength - viewport());
+				const maxScroll = Math.max(0, lastRenderedLength - bodyViewport());
+				const isPageUp = data === "\x1b[5~" || data === "\x1b[[5~";
+				const isPageDown = data === "\x1b[6~" || data === "\x1b[[6~";
 				if (data === "\x1b" || data === "q") {
 					done(undefined);
 					return;
@@ -442,9 +457,12 @@ async function openFullView(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
 				} else if (data === "k" || data === "\x1b[A") {
 					scrollOffset = Math.max(0, scrollOffset - 1);
 					stick = false;
-				} else if (data === " ") {
-					scrollOffset = Math.min(maxScroll, scrollOffset + viewport());
+				} else if (data === " " || isPageDown) {
+					scrollOffset = Math.min(maxScroll, scrollOffset + bodyViewport());
 					stick = scrollOffset >= maxScroll;
+				} else if (isPageUp) {
+					scrollOffset = Math.max(0, scrollOffset - bodyViewport());
+					stick = false;
 				}
 				tui.requestRender();
 			},
